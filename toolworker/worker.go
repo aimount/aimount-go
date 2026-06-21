@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,7 +16,9 @@ var errInvalidDefinition = errors.New("invalid tool definition")
 type Worker struct {
 	config Config
 	client client
+	mu     sync.RWMutex
 	tools  map[string]registeredTool
+	run    bool
 
 	afterClaim func()
 }
@@ -38,8 +41,8 @@ func New(config Config) *Worker {
 	if config.RefreshSkew <= 0 {
 		config.RefreshSkew = time.Minute
 	}
-	if config.ManifestMode == "" {
-		config.ManifestMode = ManifestExternal
+	if config.ManifestPublishPolicy == "" {
+		config.ManifestPublishPolicy = ManifestPublishNever
 	}
 	return &Worker{
 		config: config,
@@ -49,6 +52,11 @@ func New(config Config) *Worker {
 }
 
 func (w *Worker) Handle(name string, definition Definition, handler Handler) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.run {
+		return errors.New("toolworker: handlers cannot be registered after Run starts")
+	}
 	if name == "" || definition.Version == "" || definition.Description == "" || definition.InputSchema == nil || handler == nil {
 		return errInvalidDefinition
 	}
@@ -61,8 +69,16 @@ func (w *Worker) Handle(name string, definition Definition, handler Handler) err
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	if w.config.ManifestMode == ManifestPublishOnStart {
-		if _, err := w.client.publishManifest(ctx, w.config.Namespace, w.definitions()); err != nil {
+	w.mu.Lock()
+	if w.run {
+		w.mu.Unlock()
+		return errors.New("toolworker: Run already started")
+	}
+	w.run = true
+	w.mu.Unlock()
+
+	if w.config.ManifestPublishPolicy == ManifestPublishOnStart {
+		if _, err := w.client.publishManifest(ctx, w.config.Namespace, w.definitions(), w.config.ManifestPublishOptions); err != nil {
 			return err
 		}
 	}
@@ -84,6 +100,8 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	nonce := processNonce()
 	claimAttempt := 0
+	claimKey := ""
+	claimKeyExecutorToken := ""
 	for {
 		if ctx.Err() != nil {
 			wg.Wait()
@@ -96,35 +114,41 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		claimAttempt++
 		registrationMu.RLock()
 		executorToken := registration.ExecutorToken
 		registrationMu.RUnlock()
-		claim, err := w.client.claim(ctx, executorToken, []string{w.config.Namespace}, idempotencyKey("claim", nonce, executorToken, fmt.Sprint(claimAttempt)))
-		if w.afterClaim != nil {
-			w.afterClaim()
+		if claimKey == "" || claimKeyExecutorToken != executorToken {
+			claimAttempt++
+			claimKey = idempotencyKey("claim", nonce, executorToken, fmt.Sprint(claimAttempt))
+			claimKeyExecutorToken = executorToken
 		}
+		claim, err := w.claimWithRetry(ctx, executorToken, claimKey)
 		if err != nil {
 			w.logf("claim failed: %s", Redact(err.Error()))
+			if !IsRetryable(err) {
+				claimKey = ""
+				claimKeyExecutorToken = ""
+			}
 			if !sleep(ctx, w.config.ClaimPollInterval) {
 				continue
 			}
 			continue
 		}
+		claimKey = ""
 		if claim.Kind != "claimed" {
 			if !sleep(ctx, w.config.ClaimPollInterval) {
 				continue
 			}
 			continue
 		}
-		tool, ok := w.tools[claim.ToolCall.Name]
+		tool, ok := w.tool(claim.ToolCall.Name)
 		if !ok {
 			_ = w.submitOutcomeWithRetry(ctx, claim.OutcomeToken, Failed("tool.unknown", "tool handler is not registered", nil), claim.ClaimExpiresAt)
 			continue
 		}
 		atomic.AddInt32(&active, 1)
 		wg.Add(1)
-		go func(claim ClaimAck, tool registeredTool) {
+		go func(claim claimAck, tool registeredTool) {
 			defer wg.Done()
 			defer atomic.AddInt32(&active, -1)
 			callCtx, call, cancelCall := callContext(ctx, claim)
@@ -133,19 +157,54 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err != nil {
 				outcome = w.mapError(err)
 			}
-			if err := w.submitOutcomeWithRetry(context.WithoutCancel(ctx), claim.OutcomeToken, outcome, claim.ClaimExpiresAt); err != nil {
+			outcomeCtx, cancelOutcome := outcomeContext(claim.ClaimExpiresAt)
+			defer cancelOutcome()
+			if err := w.submitOutcomeWithRetry(outcomeCtx, claim.OutcomeToken, outcome, claim.ClaimExpiresAt); err != nil {
 				w.logf("outcome failed: %s", Redact(err.Error()))
 			}
 		}(claim, tool)
 	}
 }
 
+func (w *Worker) claimWithRetry(ctx context.Context, executorToken string, claimKey string) (claimAck, error) {
+	retried := false
+	for {
+		claim, err := w.client.claim(ctx, executorToken, []string{w.config.Namespace}, claimKey)
+		if w.afterClaim != nil {
+			w.afterClaim()
+		}
+		if err == nil || !IsRetryable(err) || retried {
+			return claim, err
+		}
+		retried = true
+		w.logf("claim retryable failure: %s", Redact(err.Error()))
+		if !sleep(ctx, w.config.ClaimPollInterval) {
+			return claim, ctx.Err()
+		}
+	}
+}
+
 func (w *Worker) definitions() []Definition {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	definitions := make([]Definition, 0, len(w.tools))
 	for _, tool := range w.tools {
 		definitions = append(definitions, tool.definition)
 	}
+	sort.Slice(definitions, func(i, j int) bool {
+		if definitions[i].Name == definitions[j].Name {
+			return definitions[i].Version < definitions[j].Version
+		}
+		return definitions[i].Name < definitions[j].Name
+	})
 	return definitions
+}
+
+func (w *Worker) tool(name string) (registeredTool, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	tool, ok := w.tools[name]
+	return tool, ok
 }
 
 func (w *Worker) mapError(err error) Outcome {
@@ -156,7 +215,7 @@ func (w *Worker) mapError(err error) Outcome {
 	return mapper(err)
 }
 
-func (w *Worker) heartbeatLoop(ctx context.Context, registration *RegisterExecutorAck, registrationMu *sync.RWMutex) {
+func (w *Worker) heartbeatLoop(ctx context.Context, registration *registerExecutorAck, registrationMu *sync.RWMutex) {
 	timer := time.NewTimer(w.config.HeartbeatInterval)
 	defer timer.Stop()
 	for {
@@ -214,7 +273,7 @@ func (w *Worker) logf(format string, args ...any) {
 	logger.Printf(format, args...)
 }
 
-func callContext(ctx context.Context, claim ClaimAck) (context.Context, Call, context.CancelFunc) {
+func callContext(ctx context.Context, claim claimAck) (context.Context, Call, context.CancelFunc) {
 	deadline, _ := time.Parse(time.RFC3339, claim.ClaimExpiresAt)
 	callCtx := ctx
 	cancel := func() {}
@@ -222,6 +281,14 @@ func callContext(ctx context.Context, claim ClaimAck) (context.Context, Call, co
 		callCtx, cancel = context.WithDeadline(ctx, deadline)
 	}
 	return callCtx, Call{Namespace: claim.ToolCall.Namespace, Name: claim.ToolCall.Name, Version: claim.ToolCall.Version, Input: claim.ToolCall.Input, Subject: claim.ToolCall.Subject, Deadline: deadline}, cancel
+}
+
+func outcomeContext(claimExpiresAt string) (context.Context, context.CancelFunc) {
+	deadline, err := time.Parse(time.RFC3339, claimExpiresAt)
+	if err == nil && !deadline.IsZero() && time.Now().Before(deadline) {
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
 func shouldRefresh(expiresAt string, skew time.Duration) bool {

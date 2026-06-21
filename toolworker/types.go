@@ -7,26 +7,37 @@ import (
 	"time"
 )
 
-type ManifestMode string
+type ManifestPublishPolicy string
 
 const (
-	ManifestExternal       ManifestMode = "external"
-	ManifestPublishOnStart ManifestMode = "publish_on_start"
+	ManifestPublishNever   ManifestPublishPolicy = "never"
+	ManifestPublishOnStart ManifestPublishPolicy = "on_start"
+
+	ManifestConflictReplaceIfTokenMatch ManifestConflictResolutionPolicy = "replace_if_token_match"
+	ManifestConflictReplace             ManifestConflictResolutionPolicy = "replace"
 )
+
+type ManifestConflictResolutionPolicy string
+
+type PublishOptions struct {
+	IfMatchManifestToken     string
+	ConflictResolutionPolicy ManifestConflictResolutionPolicy
+}
 
 type Logger interface {
 	Printf(format string, args ...any)
 }
 
 type Config struct {
-	BaseURL          string
-	AgentID          string
-	ToolServiceToken string
-	Namespace        string
-	ManifestMode     ManifestMode
-	HTTPClient       *http.Client
-	Logger           Logger
-	ErrorMapper      ErrorMapper
+	BaseURL                string
+	AgentID                string
+	ToolServiceToken       string
+	Namespace              string
+	ManifestPublishPolicy  ManifestPublishPolicy
+	ManifestPublishOptions PublishOptions
+	HTTPClient             *http.Client
+	Logger                 Logger
+	ErrorMapper            ErrorMapper
 
 	MaxConcurrentCalls int
 	ClaimPollInterval  time.Duration
@@ -69,22 +80,22 @@ type RuntimeError struct {
 	Details map[string]any `json:"details,omitempty"`
 }
 
-type ToolCallDenial struct {
+type Denial struct {
 	Code    string         `json:"code"`
 	Details map[string]any `json:"details,omitempty"`
 }
 
-type ToolCallCancellation struct {
+type Cancellation struct {
 	Code    string         `json:"code"`
 	Details map[string]any `json:"details,omitempty"`
 }
 
 type Outcome struct {
-	Status       string                `json:"status"`
-	Result       any                   `json:"result,omitempty"`
-	Error        *RuntimeError         `json:"error,omitempty"`
-	Denial       *ToolCallDenial       `json:"denial,omitempty"`
-	Cancellation *ToolCallCancellation `json:"cancellation,omitempty"`
+	Status       string        `json:"status"`
+	Result       any           `json:"result,omitempty"`
+	Error        *RuntimeError `json:"error,omitempty"`
+	Denial       *Denial       `json:"denial,omitempty"`
+	Cancellation *Cancellation `json:"cancellation,omitempty"`
 }
 
 type ErrorMapper func(error) Outcome
@@ -98,11 +109,11 @@ func Failed(code string, message string, details map[string]any) Outcome {
 }
 
 func Denied(code string, details map[string]any) Outcome {
-	return Outcome{Status: "denied", Denial: &ToolCallDenial{Code: code, Details: details}}
+	return Outcome{Status: "denied", Denial: &Denial{Code: code, Details: details}}
 }
 
 func Cancelled(code string, details map[string]any) Outcome {
-	return Outcome{Status: "cancelled", Cancellation: &ToolCallCancellation{Code: code, Details: details}}
+	return Outcome{Status: "cancelled", Cancellation: &Cancellation{Code: code, Details: details}}
 }
 
 func defaultErrorMapper(error) Outcome {

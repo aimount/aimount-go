@@ -20,8 +20,9 @@ type client struct {
 }
 
 type publishManifestRequest struct {
-	IfMatchManifestToken *string      `json:"ifMatchManifestToken"`
-	Tools                []Definition `json:"tools"`
+	IfMatchManifestToken     *string                          `json:"ifMatchManifestToken,omitempty"`
+	ConflictResolutionPolicy ManifestConflictResolutionPolicy `json:"conflictResolutionPolicy,omitempty"`
+	Tools                    []Definition                     `json:"tools"`
 }
 
 type PublishManifestAck struct {
@@ -29,24 +30,44 @@ type PublishManifestAck struct {
 	ManifestHash  string `json:"manifestHash"`
 }
 
-type RegisterExecutorAck struct {
+type registerExecutorAck struct {
 	ExecutorToken          string `json:"executorToken"`
 	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 }
 
-type ClaimAck struct {
+type claimAck struct {
 	Kind           string      `json:"kind"`
 	OutcomeToken   string      `json:"outcomeToken"`
 	ClaimExpiresAt string      `json:"claimExpiresAt"`
-	ToolCall       ClaimedCall `json:"toolCall"`
+	ToolCall       claimedCall `json:"toolCall"`
 }
 
-type ClaimedCall struct {
+type claimedCall struct {
 	Namespace string         `json:"namespace"`
 	Name      string         `json:"name"`
 	Version   string         `json:"version"`
 	Input     map[string]any `json:"input"`
 	Subject   Subject        `json:"subject"`
+}
+
+func (c *claimedCall) UnmarshalJSON(data []byte) error {
+	type claimedCallAlias claimedCall
+	var raw struct {
+		claimedCallAlias
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = claimedCall(raw.claimedCallAlias)
+	c.Input = map[string]any{}
+	if len(raw.Input) == 0 || string(raw.Input) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(raw.Input, &c.Input); err != nil {
+		return fmt.Errorf("decode tool call input: %w", err)
+	}
+	return nil
 }
 
 type submitOutcomeRequest struct {
@@ -62,14 +83,25 @@ type HeartbeatExecutorAck struct {
 	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 }
 
-func (c client) publishManifest(ctx context.Context, namespace string, definitions []Definition) (PublishManifestAck, error) {
+func (c client) publishManifest(ctx context.Context, namespace string, definitions []Definition, options PublishOptions) (PublishManifestAck, error) {
 	var ack PublishManifestAck
-	err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{Tools: definitions}, &ack, "")
+	policy := options.ConflictResolutionPolicy
+	if policy == "" {
+		policy = ManifestConflictReplaceIfTokenMatch
+	}
+	if policy == ManifestConflictReplace && options.IfMatchManifestToken != "" {
+		return ack, fmt.Errorf("ifMatchManifestToken is not allowed with replace conflict policy")
+	}
+	var ifMatch *string
+	if options.IfMatchManifestToken != "" {
+		ifMatch = &options.IfMatchManifestToken
+	}
+	err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{IfMatchManifestToken: ifMatch, ConflictResolutionPolicy: policy, Tools: definitions}, &ack, "")
 	return ack, err
 }
 
-func (c client) registerExecutor(ctx context.Context, namespaces []string) (RegisterExecutorAck, error) {
-	var ack RegisterExecutorAck
+func (c client) registerExecutor(ctx context.Context, namespaces []string) (registerExecutorAck, error) {
+	var ack registerExecutorAck
 	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/register", escape(c.agentID)), map[string]any{"namespaces": namespaces}, &ack, "")
 	return ack, err
 }
@@ -80,8 +112,8 @@ func (c client) heartbeatExecutor(ctx context.Context, executorToken string) (He
 	return ack, err
 }
 
-func (c client) claim(ctx context.Context, executorToken string, namespaces []string, key string) (ClaimAck, error) {
-	var ack ClaimAck
+func (c client) claim(ctx context.Context, executorToken string, namespaces []string, key string) (claimAck, error) {
+	var ack claimAck
 	body := map[string]any{"executorToken": executorToken}
 	if len(namespaces) > 0 {
 		body["namespaces"] = namespaces

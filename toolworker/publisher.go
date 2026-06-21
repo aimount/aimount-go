@@ -10,7 +10,7 @@ func NewManifestPublisher(config PublisherConfig) *ManifestPublisher {
 	return &ManifestPublisher{client: client{baseURL: config.BaseURL, agentID: config.AgentID, token: config.ToolServiceToken, http: config.HTTPClient}}
 }
 
-func (p *ManifestPublisher) Publish(ctx context.Context, namespace string, definitions []Definition) (PublishManifestAck, error) {
+func (p *ManifestPublisher) Publish(ctx context.Context, namespace string, definitions []Definition, options ...PublishOptions) (PublishManifestAck, error) {
 	defs := make([]Definition, len(definitions))
 	copy(defs, definitions)
 	for i := range defs {
@@ -18,5 +18,9 @@ func (p *ManifestPublisher) Publish(ctx context.Context, namespace string, defin
 			return PublishManifestAck{}, errInvalidDefinition
 		}
 	}
-	return p.client.publishManifest(ctx, namespace, defs)
+	var opts PublishOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	return p.client.publishManifest(ctx, namespace, defs, opts)
 }
