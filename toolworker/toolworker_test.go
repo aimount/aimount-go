@@ -118,12 +118,10 @@ func TestManifestPublisherSendsManifest(t *testing.T) {
 	}
 }
 
-func TestManifestPublisherSendsConflictResolutionOptions(t *testing.T) {
-	var body publishManifestRequest
+func TestManifestPublisherRejectsReplaceWithIfMatchToken(t *testing.T) {
+	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
+		called = true
 		_ = json.NewEncoder(w).Encode(PublishManifestAck{ManifestToken: "mt", ManifestHash: "mh"})
 	}))
 	defer server.Close()
@@ -133,11 +131,11 @@ func TestManifestPublisherSendsConflictResolutionOptions(t *testing.T) {
 		IfMatchManifestToken:     "manifest_1",
 		ConflictResolutionPolicy: ManifestConflictReplace,
 	})
-	if err != nil {
-		t.Fatalf("publish: %v", err)
+	if err == nil {
+		t.Fatal("expected publish option validation error")
 	}
-	if body.IfMatchManifestToken == nil || *body.IfMatchManifestToken != "manifest_1" || body.ConflictResolutionPolicy != ManifestConflictReplace {
-		t.Fatalf("unexpected body: %+v", body)
+	if called {
+		t.Fatal("server should not be called for invalid publish options")
 	}
 }
 
@@ -160,6 +158,106 @@ func TestHeartbeatExecutorReadsExtendedExpiry(t *testing.T) {
 	}
 }
 
+func TestClaimRejectsNonObjectInput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"kind":"claimed","outcomeToken":"awi_tco_out","claimExpiresAt":"2026-06-19T09:01:30Z","toolCall":{"namespace":"crm","name":"search","version":"1","input":["bad"],"subject":{"userId":"user_1"}}}`))
+	}))
+	defer server.Close()
+
+	ack, err := (client{baseURL: server.URL, agentID: "agent", token: "awi_tst_secret"}).claim(context.Background(), "awi_tex_exec", []string{"crm"}, "claim_key")
+	if err == nil {
+		t.Fatalf("expected claim decode error, got ack %+v", ack)
+	}
+}
+
+func TestRunRetriesClaimWithSameIdempotencyKey(t *testing.T) {
+	var claimKeys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/v1/agents/agent/tool/server/executors/register":
+			_ = json.NewEncoder(w).Encode(registerExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
+		case "/agent/v1/agents/agent/tool/server/claim":
+			claimKeys = append(claimKeys, r.Header.Get("idempotency-key"))
+			if len(claimKeys) < 4 {
+				http.Error(w, `{"code":"temporary"}`, http.StatusBadGateway)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "none"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker.afterClaim = func() {
+		if len(claimKeys) >= 4 {
+			cancel()
+		}
+	}
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(claimKeys) != 4 || claimKeys[0] == "" {
+		t.Fatalf("expected four claim attempts: %v", claimKeys)
+	}
+	for _, key := range claimKeys[1:] {
+		if key != claimKeys[0] {
+			t.Fatalf("expected same claim idempotency key on retry: %v", claimKeys)
+		}
+	}
+}
+
+func TestRunClearsClaimKeyAfterNonRetryableClaimError(t *testing.T) {
+	var claimKeys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/v1/agents/agent/tool/server/executors/register":
+			_ = json.NewEncoder(w).Encode(registerExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
+		case "/agent/v1/agents/agent/tool/server/claim":
+			claimKeys = append(claimKeys, r.Header.Get("idempotency-key"))
+			if len(claimKeys) == 1 {
+				http.Error(w, `{"code":"bad_request"}`, http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "none"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker.afterClaim = func() {
+		if len(claimKeys) >= 2 {
+			cancel()
+		}
+	}
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(claimKeys) != 2 || claimKeys[0] == "" || claimKeys[0] == claimKeys[1] {
+		t.Fatalf("expected new key after non-retryable claim error: %v", claimKeys)
+	}
+}
+
+func TestDefinitionsAreSorted(t *testing.T) {
+	worker := New(Config{ManifestPublishPolicy: ManifestPublishNever})
+	if err := worker.Handle("zeta", Definition{Version: "2", Description: "Z", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
+		t.Fatalf("handle zeta: %v", err)
+	}
+	if err := worker.Handle("alpha", Definition{Version: "1", Description: "A", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
+		t.Fatalf("handle alpha: %v", err)
+	}
+
+	definitions := worker.definitions()
+	if len(definitions) != 2 || definitions[0].Name != "alpha" || definitions[1].Name != "zeta" {
+		t.Fatalf("definitions not sorted: %+v", definitions)
+	}
+}
+
 func TestRunExternalSkipsManifestAndHandlesClaim(t *testing.T) {
 	var paths []string
 	var outcomeBody submitOutcomeRequest
@@ -167,12 +265,12 @@ func TestRunExternalSkipsManifestAndHandlesClaim(t *testing.T) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
 		case "/agent/v1/agents/agent/tool/server/executors/register":
-			_ = json.NewEncoder(w).Encode(RegisterExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
+			_ = json.NewEncoder(w).Encode(registerExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
 		case "/agent/v1/agents/agent/tool/server/claim":
 			if r.Header.Get("idempotency-key") == "" {
 				t.Fatal("claim missing idempotency key")
 			}
-			_ = json.NewEncoder(w).Encode(ClaimAck{Kind: "claimed", OutcomeToken: "awi_tco_out", ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: ClaimedCall{Namespace: "crm", Name: "search", Version: "1", Input: map[string]any{"q": "abc"}, Subject: Subject{UserID: "user_1"}}})
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "claimed", OutcomeToken: "awi_tco_out", ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: claimedCall{Namespace: "crm", Name: "search", Version: "1", Input: map[string]any{"q": "abc"}, Subject: Subject{UserID: "user_1"}}})
 		case "/agent/v1/agents/agent/tool/server/outcome":
 			if r.Header.Get("idempotency-key") == "" {
 				t.Fatal("outcome missing idempotency key")
@@ -219,9 +317,9 @@ func TestRunPublishOnStartPublishesBeforeRegister(t *testing.T) {
 		case "/agent/v1/agents/agent/tool/namespaces/crm/manifest":
 			_ = json.NewEncoder(w).Encode(PublishManifestAck{ManifestToken: "mt", ManifestHash: "mh"})
 		case "/agent/v1/agents/agent/tool/server/executors/register":
-			_ = json.NewEncoder(w).Encode(RegisterExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
+			_ = json.NewEncoder(w).Encode(registerExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
 		case "/agent/v1/agents/agent/tool/server/claim":
-			_ = json.NewEncoder(w).Encode(ClaimAck{Kind: "none"})
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "none"})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -256,10 +354,10 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/agent/v1/agents/agent/tool/server/executors/register":
-			_ = json.NewEncoder(w).Encode(RegisterExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
+			_ = json.NewEncoder(w).Encode(registerExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
 		case "/agent/v1/agents/agent/tool/server/claim":
 			n := atomic.AddInt32(&claimed, 1)
-			_ = json.NewEncoder(w).Encode(ClaimAck{Kind: "claimed", OutcomeToken: "awi_tco_out" + string(rune('a'+n)), ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: ClaimedCall{Namespace: "crm", Name: "work", Version: "1", Input: map[string]any{}, Subject: Subject{UserID: "user"}}})
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "claimed", OutcomeToken: "awi_tco_out" + string(rune('a'+n)), ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: claimedCall{Namespace: "crm", Name: "work", Version: "1", Input: map[string]any{}, Subject: Subject{UserID: "user"}}})
 		case "/agent/v1/agents/agent/tool/server/outcome":
 			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: true})
 		default:

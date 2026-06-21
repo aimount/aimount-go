@@ -14,11 +14,11 @@ Local and demo workers can publish their manifest on startup:
 
 ```go
 worker := toolworker.New(toolworker.Config{
-	BaseURL:          "https://api.aimount.dev",
-	AgentID:          "agent_123",
-	ToolServiceToken: "...",
-	Namespace:        "crm",
-	ManifestMode:     toolworker.ManifestPublishOnStart,
+	BaseURL:               "https://api.aimount.dev",
+	AgentID:               "agent_123",
+	ToolServiceToken:      "...",
+	Namespace:             "crm",
+	ManifestPublishPolicy: toolworker.ManifestPublishOnStart,
 })
 
 err := worker.Handle("lookup_order", toolworker.Definition{
@@ -48,7 +48,7 @@ cmd/publish-manifests
   -> exits
 
 cmd/tool-worker
-  -> runs with ManifestExternal
+  -> runs with ManifestPublishNever
   -> registers executor availability
   -> heartbeats, claims, executes, submits outcomes
 ```
@@ -65,16 +65,16 @@ publisher := toolworker.NewManifestPublisher(toolworker.PublisherConfig{
 _, err := publisher.Publish(ctx, "crm", definitions)
 ```
 
-The runtime worker then uses `ManifestExternal`:
+The runtime worker then uses `ManifestPublishNever`:
 
 ```go
 worker := toolworker.New(toolworker.Config{
-	BaseURL:          "https://api.aimount.dev",
-	AgentID:          "agent_123",
-	ToolServiceToken: "...",
-	Namespace:        "crm",
-	ManifestMode:     toolworker.ManifestExternal,
-	MaxConcurrentCalls: 4,
+	BaseURL:               "https://api.aimount.dev",
+	AgentID:               "agent_123",
+	ToolServiceToken:      "...",
+	Namespace:             "crm",
+	ManifestPublishPolicy: toolworker.ManifestPublishNever,
+	MaxConcurrentCalls:    4,
 })
 ```
 
@@ -82,4 +82,4 @@ worker := toolworker.New(toolworker.Config{
 
 `toolworker` does not provide Runtime session APIs, Console APIs, client/browser tool execution, per-call heartbeat, or operator/debug reads. Handlers should finish before their call deadline because the Agent API does not expose per-call heartbeat in the current MVP.
 
-The existing `services/go-tool-executor` repository remains a local Runtime API v2 verification worker for now. It can be migrated to consume `toolworker` in a later follow-up once this package is established.
+The existing `services/go-tool-executor` repository is a local Runtime API v2 verification worker and sample consumer of `toolworker`. It is still verification-oriented, not a recommended production application template.
