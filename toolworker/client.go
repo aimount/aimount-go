@@ -20,8 +20,9 @@ type client struct {
 }
 
 type publishManifestRequest struct {
-	IfMatchManifestToken *string      `json:"ifMatchManifestToken"`
-	Tools                []Definition `json:"tools"`
+	IfMatchManifestToken     *string                          `json:"ifMatchManifestToken,omitempty"`
+	ConflictResolutionPolicy ManifestConflictResolutionPolicy `json:"conflictResolutionPolicy,omitempty"`
+	Tools                    []Definition                     `json:"tools"`
 }
 
 type PublishManifestAck struct {
@@ -62,9 +63,17 @@ type HeartbeatExecutorAck struct {
 	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 }
 
-func (c client) publishManifest(ctx context.Context, namespace string, definitions []Definition) (PublishManifestAck, error) {
+func (c client) publishManifest(ctx context.Context, namespace string, definitions []Definition, options PublishOptions) (PublishManifestAck, error) {
 	var ack PublishManifestAck
-	err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{Tools: definitions}, &ack, "")
+	policy := options.ConflictResolutionPolicy
+	if policy == "" {
+		policy = ManifestConflictReplaceIfTokenMatch
+	}
+	var ifMatch *string
+	if options.IfMatchManifestToken != "" {
+		ifMatch = &options.IfMatchManifestToken
+	}
+	err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{IfMatchManifestToken: ifMatch, ConflictResolutionPolicy: policy, Tools: definitions}, &ack, "")
 	return ack, err
 }
 

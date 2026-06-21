@@ -7,26 +7,37 @@ import (
 	"time"
 )
 
-type ManifestMode string
+type ManifestPublishPolicy string
 
 const (
-	ManifestExternal       ManifestMode = "external"
-	ManifestPublishOnStart ManifestMode = "publish_on_start"
+	ManifestPublishNever   ManifestPublishPolicy = "never"
+	ManifestPublishOnStart ManifestPublishPolicy = "on_start"
+
+	ManifestConflictReplaceIfTokenMatch ManifestConflictResolutionPolicy = "replace_if_token_match"
+	ManifestConflictReplace             ManifestConflictResolutionPolicy = "replace"
 )
+
+type ManifestConflictResolutionPolicy string
+
+type PublishOptions struct {
+	IfMatchManifestToken     string
+	ConflictResolutionPolicy ManifestConflictResolutionPolicy
+}
 
 type Logger interface {
 	Printf(format string, args ...any)
 }
 
 type Config struct {
-	BaseURL          string
-	AgentID          string
-	ToolServiceToken string
-	Namespace        string
-	ManifestMode     ManifestMode
-	HTTPClient       *http.Client
-	Logger           Logger
-	ErrorMapper      ErrorMapper
+	BaseURL                string
+	AgentID                string
+	ToolServiceToken       string
+	Namespace              string
+	ManifestPublishPolicy  ManifestPublishPolicy
+	ManifestPublishOptions PublishOptions
+	HTTPClient             *http.Client
+	Logger                 Logger
+	ErrorMapper            ErrorMapper
 
 	MaxConcurrentCalls int
 	ClaimPollInterval  time.Duration

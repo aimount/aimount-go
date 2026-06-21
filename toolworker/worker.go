@@ -38,8 +38,8 @@ func New(config Config) *Worker {
 	if config.RefreshSkew <= 0 {
 		config.RefreshSkew = time.Minute
 	}
-	if config.ManifestMode == "" {
-		config.ManifestMode = ManifestExternal
+	if config.ManifestPublishPolicy == "" {
+		config.ManifestPublishPolicy = ManifestPublishNever
 	}
 	return &Worker{
 		config: config,
@@ -61,8 +61,8 @@ func (w *Worker) Handle(name string, definition Definition, handler Handler) err
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	if w.config.ManifestMode == ManifestPublishOnStart {
-		if _, err := w.client.publishManifest(ctx, w.config.Namespace, w.definitions()); err != nil {
+	if w.config.ManifestPublishPolicy == ManifestPublishOnStart {
+		if _, err := w.client.publishManifest(ctx, w.config.Namespace, w.definitions(), w.config.ManifestPublishOptions); err != nil {
 			return err
 		}
 	}

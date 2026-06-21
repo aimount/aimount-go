@@ -14,7 +14,7 @@ import (
 )
 
 func TestHandleRejectsInvalidRegistration(t *testing.T) {
-	worker := New(Config{Namespace: "crm", ManifestMode: ManifestExternal})
+	worker := New(Config{Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever})
 
 	if err := worker.Handle("", Definition{Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
 		t.Fatal("expected empty name to fail")
@@ -49,7 +49,7 @@ func TestOutcomeHelpers(t *testing.T) {
 }
 
 func TestDefaultErrorMapperIsSafe(t *testing.T) {
-	worker := New(Config{Namespace: "crm", ManifestMode: ManifestExternal})
+	worker := New(Config{Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever})
 	outcome := worker.mapError(errors.New("database password leaked"))
 	if outcome.Status != "failed" || outcome.Error == nil {
 		t.Fatalf("unexpected outcome: %+v", outcome)
@@ -110,11 +110,34 @@ func TestManifestPublisherSendsManifest(t *testing.T) {
 	if auth != "Bearer awi_tst_secret" {
 		t.Fatalf("unexpected auth header: %q", auth)
 	}
-	if len(body.Tools) != 1 || body.Tools[0].Name != "search" || body.IfMatchManifestToken != nil {
+	if len(body.Tools) != 1 || body.Tools[0].Name != "search" || body.IfMatchManifestToken != nil || body.ConflictResolutionPolicy != ManifestConflictReplaceIfTokenMatch {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 	if ack.ManifestToken != "mt" || ack.ManifestHash != "mh" {
 		t.Fatalf("unexpected ack: %+v", ack)
+	}
+}
+
+func TestManifestPublisherSendsConflictResolutionOptions(t *testing.T) {
+	var body publishManifestRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(PublishManifestAck{ManifestToken: "mt", ManifestHash: "mh"})
+	}))
+	defer server.Close()
+
+	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret"})
+	_, err := publisher.Publish(context.Background(), "crm", []Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}}, PublishOptions{
+		IfMatchManifestToken:     "manifest_1",
+		ConflictResolutionPolicy: ManifestConflictReplace,
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if body.IfMatchManifestToken == nil || *body.IfMatchManifestToken != "manifest_1" || body.ConflictResolutionPolicy != ManifestConflictReplace {
+		t.Fatalf("unexpected body: %+v", body)
 	}
 }
 
@@ -165,7 +188,7 @@ func TestRunExternalSkipsManifestAndHandlesClaim(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestMode: ManifestExternal, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	if err := worker.Handle("search", Definition{Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call Call) (Outcome, error) {
 		if call.Subject.UserID != "user_1" || call.Input["q"] != "abc" || call.Deadline.IsZero() {
 			t.Fatalf("unexpected call: %+v", call)
@@ -207,7 +230,7 @@ func TestRunPublishOnStartPublishesBeforeRegister(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := int32(0)
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestMode: ManifestPublishOnStart, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishOnStart, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	if err := worker.Handle("search", Definition{Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -247,7 +270,7 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestMode: ManifestExternal, MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	if err := worker.Handle("work", Definition{Version: "1", Description: "Work", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call Call) (Outcome, error) {
 		wg.Add(1)
 		defer wg.Done()
