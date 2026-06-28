@@ -5,6 +5,31 @@ Go SDK packages for Aimount.
 ## Packages
 
 - `toolworker`: primitives for building Agent API server tool execution workers in Go.
+- `runtimeauth`: server-side helper for issuing Runtime API v2 user tokens from a Go backend.
+
+## Runtime Auth Quickstart
+
+`runtimeauth` lets a trusted Go backend request a short-lived runtime user token for an end user of the client product.
+
+```go
+issuer := runtimeauth.New(runtimeauth.Config{
+	BaseURL:      "https://api.aimount.dev",
+	AgentID:      "agent_123",
+	ServerAPIKey: "...",
+})
+
+token, err := issuer.IssueUserToken(context.Background(), runtimeauth.IssueUserTokenRequest{
+	ProfileID: "profile_123",
+	UserID:    "user_from_client_product",
+})
+if err != nil {
+	panic(err)
+}
+
+_ = token.RuntimeToken
+```
+
+`ServerAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user runtime clients; send only the issued runtime user token payload to those clients.
 
 ## Toolworker Quickstart
 
