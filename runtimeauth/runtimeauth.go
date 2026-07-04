@@ -14,17 +14,17 @@ import (
 )
 
 type Config struct {
-	BaseURL      string
-	AgentID      string
-	ServerAPIKey string
-	HTTPClient   *http.Client
+	BaseURL     string
+	AgentID     string
+	AgentAPIKey string
+	HTTPClient  *http.Client
 }
 
 type Client struct {
-	baseURL      string
-	agentID      string
-	serverAPIKey string
-	http         *http.Client
+	baseURL     string
+	agentID     string
+	agentAPIKey string
+	http        *http.Client
 }
 
 type IssueUserTokenRequest struct {
@@ -50,7 +50,7 @@ type issueUserTokenResponse struct {
 }
 
 func New(config Config) Client {
-	return Client{baseURL: config.BaseURL, agentID: config.AgentID, serverAPIKey: config.ServerAPIKey, http: config.HTTPClient}
+	return Client{baseURL: config.BaseURL, agentID: config.AgentID, agentAPIKey: config.AgentAPIKey, http: config.HTTPClient}
 }
 
 func (c Client) IssueUserToken(ctx context.Context, request IssueUserTokenRequest) (UserToken, error) {
@@ -60,8 +60,8 @@ func (c Client) IssueUserToken(ctx context.Context, request IssueUserTokenReques
 	if strings.TrimSpace(c.agentID) == "" {
 		return UserToken{}, errors.New("runtimeauth: agent id is required")
 	}
-	if strings.TrimSpace(c.serverAPIKey) == "" {
-		return UserToken{}, errors.New("runtimeauth: server api key is required")
+	if strings.TrimSpace(c.agentAPIKey) == "" {
+		return UserToken{}, errors.New("runtimeauth: agent api key is required")
 	}
 	if strings.TrimSpace(request.ProfileID) == "" {
 		return UserToken{}, errors.New("runtimeauth: profile id is required")
@@ -96,7 +96,7 @@ func (c Client) do(ctx context.Context, method string, path string, body any, re
 		return err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+c.serverAPIKey)
+	req.Header.Set("authorization", "Bearer "+c.agentAPIKey)
 	httpClient := c.http
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}

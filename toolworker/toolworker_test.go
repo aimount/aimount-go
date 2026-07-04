@@ -99,7 +99,7 @@ func TestManifestPublisherSendsManifest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent/1", ToolServiceToken: "awi_tst_secret"})
+	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent/1", AgentAPIKey: "awi_tst_secret"})
 	ack, err := publisher.Publish(context.Background(), "crm/tools", []Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}})
 	if err != nil {
 		t.Fatalf("publish: %v", err)
@@ -126,7 +126,7 @@ func TestManifestPublisherRejectsReplaceWithIfMatchToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret"})
+	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret"})
 	_, err := publisher.Publish(context.Background(), "crm", []Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}}, PublishOptions{
 		IfMatchManifestToken:     "manifest_1",
 		ConflictResolutionPolicy: ManifestConflictReplace,
@@ -190,7 +190,7 @@ func TestRunRetriesClaimWithSameIdempotencyKey(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	worker.afterClaim = func() {
 		if len(claimKeys) >= 4 {
 			cancel()
@@ -229,7 +229,7 @@ func TestRunClearsClaimKeyAfterNonRetryableClaimError(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	worker.afterClaim = func() {
 		if len(claimKeys) >= 2 {
 			cancel()
@@ -286,7 +286,7 @@ func TestRunExternalSkipsManifestAndHandlesClaim(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	if err := worker.Handle("search", Definition{Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call Call) (Outcome, error) {
 		if call.Subject.UserID != "user_1" || call.Input["q"] != "abc" || call.Deadline.IsZero() {
 			t.Fatalf("unexpected call: %+v", call)
@@ -328,7 +328,7 @@ func TestRunPublishOnStartPublishesBeforeRegister(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := int32(0)
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishOnStart, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishOnStart, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	if err := worker.Handle("search", Definition{Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	worker := New(Config{BaseURL: server.URL, AgentID: "agent", ToolServiceToken: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
+	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
 	if err := worker.Handle("work", Definition{Version: "1", Description: "Work", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call Call) (Outcome, error) {
 		wg.Add(1)
 		defer wg.Done()

@@ -31,7 +31,7 @@ func TestIssueUserTokenSendsRequestAndDecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(Config{BaseURL: server.URL, AgentID: "agent/1", ServerAPIKey: "awi_tst_secret"})
+	client := New(Config{BaseURL: server.URL, AgentID: "agent/1", AgentAPIKey: "awi_tst_secret"})
 	token, err := client.IssueUserToken(context.Background(), IssueUserTokenRequest{ProfileID: "profile_1", UserID: "user_1"})
 	if err != nil {
 		t.Fatalf("issue token: %v", err)
@@ -66,11 +66,11 @@ func TestIssueUserTokenValidatesRequiredFields(t *testing.T) {
 		config  Config
 		request IssueUserTokenRequest
 	}{
-		{name: "base url", config: Config{AgentID: "agent", ServerAPIKey: "key"}, request: IssueUserTokenRequest{ProfileID: "profile", UserID: "user"}},
-		{name: "agent id", config: Config{BaseURL: server.URL, ServerAPIKey: "key"}, request: IssueUserTokenRequest{ProfileID: "profile", UserID: "user"}},
-		{name: "server api key", config: Config{BaseURL: server.URL, AgentID: "agent"}, request: IssueUserTokenRequest{ProfileID: "profile", UserID: "user"}},
-		{name: "profile id", config: Config{BaseURL: server.URL, AgentID: "agent", ServerAPIKey: "key"}, request: IssueUserTokenRequest{UserID: "user"}},
-		{name: "user id", config: Config{BaseURL: server.URL, AgentID: "agent", ServerAPIKey: "key"}, request: IssueUserTokenRequest{ProfileID: "profile"}},
+		{name: "base url", config: Config{AgentID: "agent", AgentAPIKey: "key"}, request: IssueUserTokenRequest{ProfileID: "profile", UserID: "user"}},
+		{name: "agent id", config: Config{BaseURL: server.URL, AgentAPIKey: "key"}, request: IssueUserTokenRequest{ProfileID: "profile", UserID: "user"}},
+		{name: "agent api key", config: Config{BaseURL: server.URL, AgentID: "agent"}, request: IssueUserTokenRequest{ProfileID: "profile", UserID: "user"}},
+		{name: "profile id", config: Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "key"}, request: IssueUserTokenRequest{UserID: "user"}},
+		{name: "user id", config: Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "key"}, request: IssueUserTokenRequest{ProfileID: "profile"}},
 	}
 
 	for _, tt := range tests {
@@ -89,16 +89,16 @@ func TestIssueUserTokenValidatesRequiredFields(t *testing.T) {
 func TestIssueUserTokenAPIErrorAndRetryability(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"code":"unauthorized.runtime.v2.server_api_key"}`))
+		_, _ = w.Write([]byte(`{"code":"unauthorized.runtime.v2.agent_api_key"}`))
 	}))
 	defer server.Close()
 
-	_, err := New(Config{BaseURL: server.URL, AgentID: "agent", ServerAPIKey: "awi_tst_secret"}).IssueUserToken(context.Background(), IssueUserTokenRequest{ProfileID: "profile", UserID: "user"})
+	_, err := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret"}).IssueUserToken(context.Background(), IssueUserTokenRequest{ProfileID: "profile", UserID: "user"})
 	var apiErr APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("expected APIError, got %T %[1]v", err)
 	}
-	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/runtime/tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.runtime.v2.server_api_key" {
+	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/runtime/tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.runtime.v2.agent_api_key" {
 		t.Fatalf("unexpected api error: %+v", apiErr)
 	}
 	if strings.Contains(apiErr.Error(), "awi_tst_secret") {

@@ -15,7 +15,7 @@ Go SDK packages for Aimount.
 issuer := runtimeauth.New(runtimeauth.Config{
 	BaseURL:      "https://api.aimount.dev",
 	AgentID:      "agent_123",
-	ServerAPIKey: "...",
+	AgentAPIKey: "...",
 })
 
 token, err := issuer.IssueUserToken(context.Background(), runtimeauth.IssueUserTokenRequest{
@@ -29,7 +29,7 @@ if err != nil {
 _ = token.RuntimeToken
 ```
 
-`ServerAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user runtime clients; send only the issued runtime user token payload to those clients.
+`AgentAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user runtime clients; send only the issued runtime user token payload to those clients.
 
 ## Toolworker Quickstart
 
@@ -41,7 +41,7 @@ Local and demo workers can publish their manifest on startup:
 worker := toolworker.New(toolworker.Config{
 	BaseURL:               "https://api.aimount.dev",
 	AgentID:               "agent_123",
-	ToolServiceToken:      "...",
+	AgentAPIKey:           "...",
 	Namespace:             "crm",
 	ManifestPublishPolicy: toolworker.ManifestPublishOnStart,
 })
@@ -96,7 +96,7 @@ The manifest publisher can reuse the same definitions as the worker:
 publisher := toolworker.NewManifestPublisher(toolworker.PublisherConfig{
 	BaseURL:          "https://api.aimount.dev",
 	AgentID:          "agent_123",
-	ToolServiceToken: "...",
+	AgentAPIKey:     "...",
 })
 
 _, err := publisher.Publish(ctx, "crm", definitions)
@@ -108,7 +108,7 @@ The runtime worker then uses `ManifestPublishNever`:
 worker := toolworker.New(toolworker.Config{
 	BaseURL:               "https://api.aimount.dev",
 	AgentID:               "agent_123",
-	ToolServiceToken:      "...",
+	AgentAPIKey:           "...",
 	Namespace:             "crm",
 	ManifestPublishPolicy: toolworker.ManifestPublishNever,
 	MaxConcurrentCalls:    4,
