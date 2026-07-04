@@ -43,11 +43,12 @@ type claimAck struct {
 }
 
 type claimedCall struct {
-	Namespace string         `json:"namespace"`
-	Name      string         `json:"name"`
-	Version   string         `json:"version"`
-	Input     map[string]any `json:"input"`
-	Subject   Subject        `json:"subject"`
+	Namespace string          `json:"namespace"`
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Input     map[string]any  `json:"input"`
+	InputRaw  json.RawMessage `json:"-"`
+	Subject   Subject         `json:"subject"`
 }
 
 func (c *claimedCall) UnmarshalJSON(data []byte) error {
@@ -64,6 +65,7 @@ func (c *claimedCall) UnmarshalJSON(data []byte) error {
 	if len(raw.Input) == 0 || string(raw.Input) == "null" {
 		return nil
 	}
+	c.InputRaw = append(c.InputRaw[:0], raw.Input...)
 	if err := json.Unmarshal(raw.Input, &c.Input); err != nil {
 		return fmt.Errorf("decode tool call input: %w", err)
 	}

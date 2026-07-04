@@ -46,12 +46,24 @@ worker := toolworker.New(toolworker.Config{
 	ManifestPublishPolicy: toolworker.ManifestPublishOnStart,
 })
 
-err := worker.Handle("lookup_order", toolworker.Definition{
+type LookupOrderInput struct {
+	OrderID string `json:"orderId" jsonschema:"required,description=Order id"`
+}
+
+type LookupOrderOutput struct {
+	Status string `json:"status"`
+	UserID string `json:"userId"`
+}
+
+err := toolworker.Handle(worker, "lookup_order", toolworker.Definition{
 	Version:     "1",
 	Description: "Look up an order by id.",
-	InputSchema: map[string]any{"type": "object"},
-}, func(ctx context.Context, call toolworker.Call) (toolworker.Outcome, error) {
-	return toolworker.Succeeded(map[string]any{"userId": call.Subject.UserID}), nil
+}, func(ctx context.Context, call toolworker.TypedCall[LookupOrderInput]) (LookupOrderOutput, error) {
+	if call.Input.OrderID == "" {
+		return LookupOrderOutput{}, toolworker.NewToolError("order.id_required", "order id is required", nil)
+	}
+
+	return LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID}, nil
 })
 if err != nil {
 	panic(err)

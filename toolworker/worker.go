@@ -208,6 +208,9 @@ func (w *Worker) tool(name string) (registeredTool, bool) {
 }
 
 func (w *Worker) mapError(err error) Outcome {
+	if outcome, ok := outcomeForToolError(err); ok {
+		return outcome
+	}
 	mapper := w.config.ErrorMapper
 	if mapper == nil {
 		mapper = defaultErrorMapper
@@ -280,7 +283,7 @@ func callContext(ctx context.Context, claim claimAck) (context.Context, Call, co
 	if !deadline.IsZero() {
 		callCtx, cancel = context.WithDeadline(ctx, deadline)
 	}
-	return callCtx, Call{Namespace: claim.ToolCall.Namespace, Name: claim.ToolCall.Name, Version: claim.ToolCall.Version, Input: claim.ToolCall.Input, Subject: claim.ToolCall.Subject, Deadline: deadline}, cancel
+	return callCtx, Call{Namespace: claim.ToolCall.Namespace, Name: claim.ToolCall.Name, Version: claim.ToolCall.Version, Input: claim.ToolCall.Input, inputRaw: claim.ToolCall.InputRaw, Subject: claim.ToolCall.Subject, Deadline: deadline}, cancel
 }
 
 func outcomeContext(claimExpiresAt string) (context.Context, context.CancelFunc) {

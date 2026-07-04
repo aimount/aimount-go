@@ -54,7 +54,7 @@ func TestDefaultErrorMapperIsSafe(t *testing.T) {
 	if outcome.Status != "failed" || outcome.Error == nil {
 		t.Fatalf("unexpected outcome: %+v", outcome)
 	}
-	if outcome.Error.Code != "tool.internal_error" {
+	if outcome.Error.Code != "unknown" {
 		t.Fatalf("unexpected code: %s", outcome.Error.Code)
 	}
 	if strings.Contains(outcome.Error.Message, "database") || strings.Contains(outcome.Error.Message, "password") {
