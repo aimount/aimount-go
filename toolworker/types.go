@@ -31,7 +31,7 @@ type Logger interface {
 type Config struct {
 	BaseURL                string
 	AgentID                string
-	ToolServiceToken       string
+	AgentAPIKey            string
 	Namespace              string
 	ManifestPublishPolicy  ManifestPublishPolicy
 	ManifestPublishOptions PublishOptions
@@ -46,10 +46,10 @@ type Config struct {
 }
 
 type PublisherConfig struct {
-	BaseURL          string
-	AgentID          string
-	ToolServiceToken string
-	HTTPClient       *http.Client
+	BaseURL     string
+	AgentID     string
+	AgentAPIKey string
+	HTTPClient  *http.Client
 }
 
 type Definition struct {

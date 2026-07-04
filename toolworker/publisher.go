@@ -7,7 +7,7 @@ type ManifestPublisher struct {
 }
 
 func NewManifestPublisher(config PublisherConfig) *ManifestPublisher {
-	return &ManifestPublisher{client: client{baseURL: config.BaseURL, agentID: config.AgentID, token: config.ToolServiceToken, http: config.HTTPClient}}
+	return &ManifestPublisher{client: client{baseURL: config.BaseURL, agentID: config.AgentID, token: config.AgentAPIKey, http: config.HTTPClient}}
 }
 
 func (p *ManifestPublisher) Publish(ctx context.Context, namespace string, definitions []Definition, options ...PublishOptions) (PublishManifestAck, error) {

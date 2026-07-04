@@ -46,7 +46,7 @@ func New(config Config) *Worker {
 	}
 	return &Worker{
 		config: config,
-		client: client{baseURL: config.BaseURL, agentID: config.AgentID, token: config.ToolServiceToken, http: config.HTTPClient},
+		client: client{baseURL: config.BaseURL, agentID: config.AgentID, token: config.AgentAPIKey, http: config.HTTPClient},
 		tools:  map[string]registeredTool{},
 	}
 }
