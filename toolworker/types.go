@@ -2,6 +2,7 @@ package toolworker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -66,6 +67,7 @@ type Call struct {
 	Name      string
 	Version   string
 	Input     map[string]any
+	inputRaw  json.RawMessage
 	Subject   Subject
 	Deadline  time.Time
 }
@@ -117,7 +119,7 @@ func Cancelled(code string, details map[string]any) Outcome {
 }
 
 func defaultErrorMapper(error) Outcome {
-	return Failed("tool.internal_error", "tool execution failed", nil)
+	return Failed("unknown", "Tool execution failed", nil)
 }
 
 type APIError struct {
