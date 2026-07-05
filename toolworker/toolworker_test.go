@@ -11,54 +11,33 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aimount/aimount-go/tool"
 )
+
+type emptyInput struct{}
+
+type searchInput struct {
+	Q string `json:"q"`
+}
 
 func TestHandleRejectsInvalidRegistration(t *testing.T) {
 	worker := New(Config{Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever})
 
-	if err := worker.Handle("", Definition{Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
+	if err := Handle(worker, tool.Definition{Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
 		t.Fatal("expected empty name to fail")
 	}
-	if err := worker.Handle("search", Definition{Version: "", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
+	if err := Handle(worker, tool.Definition{Name: "search", Version: "", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
 		t.Fatal("expected missing version to fail")
 	}
-	if err := worker.Handle("search", Definition{Version: "1", Description: "desc", InputSchema: map[string]any{}}, nil); err == nil {
+	if err := Handle[emptyInput](worker, tool.Definition{Name: "search", Version: "1", Description: "desc", InputSchema: map[string]any{}}, nil); err == nil {
 		t.Fatal("expected nil handler to fail")
 	}
-	if err := worker.Handle("search", Definition{Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err != nil {
+	if err := Handle(worker, tool.Definition{Name: "search", Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err != nil {
 		t.Fatalf("register search: %v", err)
 	}
-	if err := worker.Handle("search", Definition{Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
+	if err := Handle(worker, tool.Definition{Name: "search", Version: "1", Description: "desc", InputSchema: map[string]any{}}, noopHandler); err == nil {
 		t.Fatal("expected duplicate handler to fail")
-	}
-}
-
-func TestOutcomeHelpers(t *testing.T) {
-	if got := Succeeded(map[string]any{"ok": true}); got.Status != "succeeded" || got.Result == nil {
-		t.Fatalf("unexpected succeeded outcome: %+v", got)
-	}
-	if got := Failed("x", "failed", nil); got.Status != "failed" || got.Error == nil || got.Error.Code != "x" {
-		t.Fatalf("unexpected failed outcome: %+v", got)
-	}
-	if got := Denied("not_allowed", nil); got.Status != "denied" || got.Denial == nil || got.Denial.Code != "not_allowed" {
-		t.Fatalf("unexpected denied outcome: %+v", got)
-	}
-	if got := Cancelled("stopped", nil); got.Status != "cancelled" || got.Cancellation == nil || got.Cancellation.Code != "stopped" {
-		t.Fatalf("unexpected cancelled outcome: %+v", got)
-	}
-}
-
-func TestDefaultErrorMapperIsSafe(t *testing.T) {
-	worker := New(Config{Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever})
-	outcome := worker.mapError(errors.New("database password leaked"))
-	if outcome.Status != "failed" || outcome.Error == nil {
-		t.Fatalf("unexpected outcome: %+v", outcome)
-	}
-	if outcome.Error.Code != "unknown" {
-		t.Fatalf("unexpected code: %s", outcome.Error.Code)
-	}
-	if strings.Contains(outcome.Error.Message, "database") || strings.Contains(outcome.Error.Message, "password") {
-		t.Fatalf("default mapper leaked raw error: %q", outcome.Error.Message)
 	}
 }
 
@@ -100,7 +79,7 @@ func TestManifestPublisherSendsManifest(t *testing.T) {
 	defer server.Close()
 
 	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent/1", AgentAPIKey: "awi_tst_secret"})
-	ack, err := publisher.Publish(context.Background(), "crm/tools", []Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}})
+	ack, err := publisher.Publish(context.Background(), tool.Manifest{Namespace: "crm/tools", Definitions: []tool.Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}}})
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -127,7 +106,7 @@ func TestManifestPublisherRejectsReplaceWithIfMatchToken(t *testing.T) {
 	defer server.Close()
 
 	publisher := NewManifestPublisher(PublisherConfig{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret"})
-	_, err := publisher.Publish(context.Background(), "crm", []Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}}, PublishOptions{
+	_, err := publisher.Publish(context.Background(), tool.Manifest{Namespace: "crm", Definitions: []tool.Definition{{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}}}, PublishOptions{
 		IfMatchManifestToken:     "manifest_1",
 		ConflictResolutionPolicy: ManifestConflictReplace,
 	})
@@ -245,10 +224,10 @@ func TestRunClearsClaimKeyAfterNonRetryableClaimError(t *testing.T) {
 
 func TestDefinitionsAreSorted(t *testing.T) {
 	worker := New(Config{ManifestPublishPolicy: ManifestPublishNever})
-	if err := worker.Handle("zeta", Definition{Version: "2", Description: "Z", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
+	if err := Handle(worker, tool.Definition{Name: "zeta", Version: "2", Description: "Z", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
 		t.Fatalf("handle zeta: %v", err)
 	}
-	if err := worker.Handle("alpha", Definition{Version: "1", Description: "A", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
+	if err := Handle(worker, tool.Definition{Name: "alpha", Version: "1", Description: "A", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
 		t.Fatalf("handle alpha: %v", err)
 	}
 
@@ -270,7 +249,7 @@ func TestRunExternalSkipsManifestAndHandlesClaim(t *testing.T) {
 			if r.Header.Get("idempotency-key") == "" {
 				t.Fatal("claim missing idempotency key")
 			}
-			_ = json.NewEncoder(w).Encode(claimAck{Kind: "claimed", OutcomeToken: "awi_tco_out", ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: claimedCall{Namespace: "crm", Name: "search", Version: "1", Input: map[string]any{"q": "abc"}, Subject: Subject{UserID: "user_1"}}})
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "claimed", OutcomeToken: "awi_tco_out", ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: claimedCall{Namespace: "crm", Name: "search", Version: "1", Input: map[string]any{"q": "abc"}, Subject: tool.Subject{UserID: "user_1"}}})
 		case "/agent/v1/agents/agent/tool/server/outcome":
 			if r.Header.Get("idempotency-key") == "" {
 				t.Fatal("outcome missing idempotency key")
@@ -287,12 +266,12 @@ func TestRunExternalSkipsManifestAndHandlesClaim(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
-	if err := worker.Handle("search", Definition{Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call Call) (Outcome, error) {
-		if call.Subject.UserID != "user_1" || call.Input["q"] != "abc" || call.Deadline.IsZero() {
+	if err := Handle(worker, tool.Definition{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call tool.Call[searchInput]) tool.Out {
+		if call.Subject.UserID != "user_1" || call.Input.Q != "abc" || call.Deadline.IsZero() {
 			t.Fatalf("unexpected call: %+v", call)
 		}
 		cancel()
-		return Succeeded(map[string]any{"ok": true}), nil
+		return tool.OK(map[string]any{"ok": true})
 	}); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -329,7 +308,7 @@ func TestRunPublishOnStartPublishesBeforeRegister(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := int32(0)
 	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishOnStart, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
-	if err := worker.Handle("search", Definition{Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
+	if err := Handle(worker, tool.Definition{Name: "search", Version: "1", Description: "Search", InputSchema: map[string]any{"type": "object"}}, noopHandler); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	go func() {
@@ -357,7 +336,7 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(registerExecutorAck{ExecutorToken: "awi_tex_exec", ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)})
 		case "/agent/v1/agents/agent/tool/server/claim":
 			n := atomic.AddInt32(&claimed, 1)
-			_ = json.NewEncoder(w).Encode(claimAck{Kind: "claimed", OutcomeToken: "awi_tco_out" + string(rune('a'+n)), ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: claimedCall{Namespace: "crm", Name: "work", Version: "1", Input: map[string]any{}, Subject: Subject{UserID: "user"}}})
+			_ = json.NewEncoder(w).Encode(claimAck{Kind: "claimed", OutcomeToken: "awi_tco_out" + string(rune('a'+n)), ClaimExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), ToolCall: claimedCall{Namespace: "crm", Name: "work", Version: "1", Input: map[string]any{}, Subject: tool.Subject{UserID: "user"}}})
 		case "/agent/v1/agents/agent/tool/server/outcome":
 			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: true})
 		default:
@@ -369,7 +348,7 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	worker := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "awi_tst_secret", Namespace: "crm", ManifestPublishPolicy: ManifestPublishNever, MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour})
-	if err := worker.Handle("work", Definition{Version: "1", Description: "Work", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call Call) (Outcome, error) {
+	if err := Handle(worker, tool.Definition{Name: "work", Version: "1", Description: "Work", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, call tool.Call[emptyInput]) tool.Out {
 		wg.Add(1)
 		defer wg.Done()
 		current := atomic.AddInt32(&running, 1)
@@ -384,7 +363,7 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 		if atomic.LoadInt32(&claimed) >= 4 {
 			cancel()
 		}
-		return Succeeded(nil), nil
+		return tool.OK(nil)
 	}); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -397,4 +376,4 @@ func TestRunBoundsParallelHandlers(t *testing.T) {
 	}
 }
 
-func noopHandler(context.Context, Call) (Outcome, error) { return Succeeded(nil), nil }
+func noopHandler(context.Context, tool.Call[emptyInput]) tool.Out { return tool.OK(nil) }

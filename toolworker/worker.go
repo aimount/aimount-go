@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/aimount/aimount-go/tool"
 )
 
 var errInvalidDefinition = errors.New("invalid tool definition")
@@ -24,8 +26,8 @@ type Worker struct {
 }
 
 type registeredTool struct {
-	definition Definition
-	handler    Handler
+	definition tool.Definition
+	handler    handler
 }
 
 func New(config Config) *Worker {
@@ -51,20 +53,19 @@ func New(config Config) *Worker {
 	}
 }
 
-func (w *Worker) Handle(name string, definition Definition, handler Handler) error {
+func (w *Worker) handle(definition tool.Definition, handler handler) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.run {
 		return errors.New("toolworker: handlers cannot be registered after Run starts")
 	}
-	if name == "" || definition.Version == "" || definition.Description == "" || definition.InputSchema == nil || handler == nil {
+	if definition.Name == "" || definition.Version == "" || definition.Description == "" || definition.InputSchema == nil || handler == nil {
 		return errInvalidDefinition
 	}
-	if _, ok := w.tools[name]; ok {
-		return fmt.Errorf("toolworker: duplicate handler for %q", name)
+	if _, ok := w.tools[definition.Name]; ok {
+		return fmt.Errorf("toolworker: duplicate handler for %q", definition.Name)
 	}
-	definition.Name = name
-	w.tools[name] = registeredTool{definition: definition, handler: handler}
+	w.tools[definition.Name] = registeredTool{definition: definition, handler: handler}
 	return nil
 }
 
@@ -143,7 +144,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		tool, ok := w.tool(claim.ToolCall.Name)
 		if !ok {
-			_ = w.submitOutcomeWithRetry(ctx, claim.OutcomeToken, Failed("tool.unknown", "tool handler is not registered", nil), claim.ClaimExpiresAt)
+			_ = w.submitOutcomeWithRetry(ctx, claim.OutcomeToken, failed("tool.unknown", "tool handler is not registered", nil), claim.ClaimExpiresAt)
 			continue
 		}
 		atomic.AddInt32(&active, 1)
@@ -155,7 +156,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			defer cancelCall()
 			outcome, err := tool.handler(callCtx, call)
 			if err != nil {
-				outcome = w.mapError(err)
+				outcome = internalFailure()
 			}
 			outcomeCtx, cancelOutcome := outcomeContext(claim.ClaimExpiresAt)
 			defer cancelOutcome()
@@ -184,10 +185,10 @@ func (w *Worker) claimWithRetry(ctx context.Context, executorToken string, claim
 	}
 }
 
-func (w *Worker) definitions() []Definition {
+func (w *Worker) definitions() []tool.Definition {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	definitions := make([]Definition, 0, len(w.tools))
+	definitions := make([]tool.Definition, 0, len(w.tools))
 	for _, tool := range w.tools {
 		definitions = append(definitions, tool.definition)
 	}
@@ -205,17 +206,6 @@ func (w *Worker) tool(name string) (registeredTool, bool) {
 	defer w.mu.RUnlock()
 	tool, ok := w.tools[name]
 	return tool, ok
-}
-
-func (w *Worker) mapError(err error) Outcome {
-	if outcome, ok := outcomeForToolError(err); ok {
-		return outcome
-	}
-	mapper := w.config.ErrorMapper
-	if mapper == nil {
-		mapper = defaultErrorMapper
-	}
-	return mapper(err)
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context, registration *registerExecutorAck, registrationMu *sync.RWMutex) {
@@ -251,7 +241,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, registration *registerExecut
 	}
 }
 
-func (w *Worker) submitOutcomeWithRetry(ctx context.Context, outcomeToken string, outcome Outcome, claimExpiresAt string) error {
+func (w *Worker) submitOutcomeWithRetry(ctx context.Context, outcomeToken string, outcome outcome, claimExpiresAt string) error {
 	key := idempotencyKey("outcome", outcomeToken)
 	deadline, _ := time.Parse(time.RFC3339, claimExpiresAt)
 	for {
@@ -276,14 +266,14 @@ func (w *Worker) logf(format string, args ...any) {
 	logger.Printf(format, args...)
 }
 
-func callContext(ctx context.Context, claim claimAck) (context.Context, Call, context.CancelFunc) {
+func callContext(ctx context.Context, claim claimAck) (context.Context, call, context.CancelFunc) {
 	deadline, _ := time.Parse(time.RFC3339, claim.ClaimExpiresAt)
 	callCtx := ctx
 	cancel := func() {}
 	if !deadline.IsZero() {
 		callCtx, cancel = context.WithDeadline(ctx, deadline)
 	}
-	return callCtx, Call{Namespace: claim.ToolCall.Namespace, Name: claim.ToolCall.Name, Version: claim.ToolCall.Version, Input: claim.ToolCall.Input, inputRaw: claim.ToolCall.InputRaw, Subject: claim.ToolCall.Subject, Deadline: deadline}, cancel
+	return callCtx, call{Namespace: claim.ToolCall.Namespace, Name: claim.ToolCall.Name, Version: claim.ToolCall.Version, Input: claim.ToolCall.Input, inputRaw: claim.ToolCall.InputRaw, Subject: claim.ToolCall.Subject, Deadline: deadline}, cancel
 }
 
 func outcomeContext(claimExpiresAt string) (context.Context, context.CancelFunc) {

@@ -1,6 +1,10 @@
 package toolworker
 
-import "context"
+import (
+	"context"
+
+	"github.com/aimount/aimount-go/tool"
+)
 
 type ManifestPublisher struct {
 	client client
@@ -10,9 +14,9 @@ func NewManifestPublisher(config PublisherConfig) *ManifestPublisher {
 	return &ManifestPublisher{client: client{baseURL: config.BaseURL, agentID: config.AgentID, token: config.AgentAPIKey, http: config.HTTPClient}}
 }
 
-func (p *ManifestPublisher) Publish(ctx context.Context, namespace string, definitions []Definition, options ...PublishOptions) (PublishManifestAck, error) {
-	defs := make([]Definition, len(definitions))
-	copy(defs, definitions)
+func (p *ManifestPublisher) Publish(ctx context.Context, manifest tool.Manifest, options ...PublishOptions) (PublishManifestAck, error) {
+	defs := make([]tool.Definition, len(manifest.Definitions))
+	copy(defs, manifest.Definitions)
 	for i := range defs {
 		if defs[i].Name == "" {
 			return PublishManifestAck{}, errInvalidDefinition
@@ -22,5 +26,5 @@ func (p *ManifestPublisher) Publish(ctx context.Context, namespace string, defin
 	if len(options) > 0 {
 		opts = options[0]
 	}
-	return p.client.publishManifest(ctx, namespace, defs, opts)
+	return p.client.publishManifest(ctx, manifest.Namespace, defs, opts)
 }

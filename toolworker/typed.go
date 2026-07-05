@@ -4,87 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"reflect"
-	"strings"
-	"time"
 
-	"github.com/invopop/jsonschema"
+	"github.com/aimount/aimount-go/tool"
 )
 
-type TypedCall[T any] struct {
-	Namespace string
-	Name      string
-	Version   string
-	Input     T
-	Subject   Subject
-	Deadline  time.Time
-}
-
-type TypedHandler[In any, Out any] func(context.Context, TypedCall[In]) (Out, error)
-
-type ToolError struct {
-	Code    string
-	Message string
-	Details map[string]any
-}
-
-func NewToolError(code string, message string, details map[string]any) error {
-	if strings.TrimSpace(code) == "" {
-		code = "unknown"
-	}
-	if strings.TrimSpace(message) == "" {
-		message = "Tool execution failed"
-	}
-	return ToolError{Code: code, Message: message, Details: details}
-}
-
-func (e ToolError) Error() string {
-	if e.Message != "" {
-		return e.Message
-	}
-	return e.Code
-}
-
-func SchemaOf[T any]() (any, error) {
-	var input T
-	typeOfInput := reflect.TypeOf(input)
-	if typeOfInput == nil || typeOfInput.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("toolworker: typed tool input must be a struct")
-	}
-
-	reflector := jsonschema.Reflector{Anonymous: true, ExpandedStruct: true, DoNotReference: true}
-	schema := reflector.Reflect(&input)
-	encoded, err := json.Marshal(schema)
-	if err != nil {
-		return nil, err
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		return nil, err
-	}
-	return decoded, nil
-}
-
-func Handle[In any, Out any](worker *Worker, name string, definition Definition, handler TypedHandler[In, Out]) error {
+func Handle[In any](worker *Worker, definition tool.Definition, handler tool.Handler[In]) error {
 	if worker == nil {
 		return errInvalidDefinition
 	}
 	if handler == nil {
 		return errInvalidDefinition
 	}
-	schema, err := SchemaOf[In]()
-	if err != nil {
-		return err
-	}
-	definition.InputSchema = schema
-	return worker.Handle(name, definition, func(ctx context.Context, call Call) (Outcome, error) {
+	return worker.handle(definition, func(ctx context.Context, call call) (outcome, error) {
 		typedInput, err := decodeTypedInput[In](call.inputRaw, call.Input)
 		if err != nil {
-			return worker.mapError(err), nil
+			return internalFailure(), nil
 		}
-		output, err := handler(ctx, TypedCall[In]{
+		out := handler(ctx, tool.Call[In]{
 			Namespace: call.Namespace,
 			Name:      call.Name,
 			Version:   call.Version,
@@ -92,10 +28,7 @@ func Handle[In any, Out any](worker *Worker, name string, definition Definition,
 			Subject:   call.Subject,
 			Deadline:  call.Deadline,
 		})
-		if err != nil {
-			return worker.mapError(err), nil
-		}
-		return Succeeded(output), nil
+		return outcomeFromOut(out), nil
 	})
 }
 
@@ -117,10 +50,9 @@ func decodeTypedInput[T any](raw json.RawMessage, input map[string]any) (T, erro
 	return decoded, nil
 }
 
-func outcomeForToolError(err error) (Outcome, bool) {
-	var toolErr ToolError
-	if !errors.As(err, &toolErr) {
-		return Outcome{}, false
+func outcomeFromOut(out tool.Out) outcome {
+	if out.Error != nil {
+		return failed(out.Error.Code, out.Error.Message, out.Error.Details)
 	}
-	return Failed(toolErr.Code, toolErr.Message, toolErr.Details), true
+	return succeeded(out.Result)
 }

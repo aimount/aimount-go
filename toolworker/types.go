@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/aimount/aimount-go/tool"
 )
 
 type ManifestPublishPolicy string
@@ -38,7 +40,6 @@ type Config struct {
 	ManifestPublishOptions PublishOptions
 	HTTPClient             *http.Client
 	Logger                 Logger
-	ErrorMapper            ErrorMapper
 
 	MaxConcurrentCalls int
 	ClaimPollInterval  time.Duration
@@ -53,73 +54,52 @@ type PublisherConfig struct {
 	HTTPClient  *http.Client
 }
 
-type Definition struct {
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
-	InputSchema any    `json:"inputSchema"`
-}
+type handler func(context.Context, call) (outcome, error)
 
-type Handler func(context.Context, Call) (Outcome, error)
-
-type Call struct {
+type call struct {
 	Namespace string
 	Name      string
 	Version   string
 	Input     map[string]any
 	inputRaw  json.RawMessage
-	Subject   Subject
+	Subject   tool.Subject
 	Deadline  time.Time
 }
 
-type Subject struct {
-	UserID string `json:"userId"`
-}
-
-type RuntimeError struct {
+type runtimeError struct {
 	Code    string         `json:"code"`
 	Message string         `json:"message"`
 	Details map[string]any `json:"details,omitempty"`
 }
 
-type Denial struct {
+type denial struct {
 	Code    string         `json:"code"`
 	Details map[string]any `json:"details,omitempty"`
 }
 
-type Cancellation struct {
+type cancellation struct {
 	Code    string         `json:"code"`
 	Details map[string]any `json:"details,omitempty"`
 }
 
-type Outcome struct {
+type outcome struct {
 	Status       string        `json:"status"`
 	Result       any           `json:"result,omitempty"`
-	Error        *RuntimeError `json:"error,omitempty"`
-	Denial       *Denial       `json:"denial,omitempty"`
-	Cancellation *Cancellation `json:"cancellation,omitempty"`
+	Error        *runtimeError `json:"error,omitempty"`
+	Denial       *denial       `json:"denial,omitempty"`
+	Cancellation *cancellation `json:"cancellation,omitempty"`
 }
 
-type ErrorMapper func(error) Outcome
-
-func Succeeded(result any) Outcome {
-	return Outcome{Status: "succeeded", Result: result}
+func succeeded(result any) outcome {
+	return outcome{Status: "succeeded", Result: result}
 }
 
-func Failed(code string, message string, details map[string]any) Outcome {
-	return Outcome{Status: "failed", Error: &RuntimeError{Code: code, Message: message, Details: details}}
+func failed(code string, message string, details map[string]any) outcome {
+	return outcome{Status: "failed", Error: &runtimeError{Code: code, Message: message, Details: details}}
 }
 
-func Denied(code string, details map[string]any) Outcome {
-	return Outcome{Status: "denied", Denial: &Denial{Code: code, Details: details}}
-}
-
-func Cancelled(code string, details map[string]any) Outcome {
-	return Outcome{Status: "cancelled", Cancellation: &Cancellation{Code: code, Details: details}}
-}
-
-func defaultErrorMapper(error) Outcome {
-	return Failed("unknown", "Tool execution failed", nil)
+func internalFailure() outcome {
+	return failed(tool.InternalErrorCode, tool.InternalErrorMessage, nil)
 }
 
 type APIError struct {
