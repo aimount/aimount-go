@@ -33,7 +33,7 @@ _ = token.RuntimeToken
 
 ## Toolworker Quickstart
 
-`toolworker` lets a Go backend declare server tools, register live executor availability, claim tool calls, run handlers, and submit terminal outcomes.
+`tool` lets a Go backend declare server tools and typed handler results. `toolworker` registers live executor availability, claims tool calls, runs handlers, and submits terminal outcomes.
 
 Local and demo workers can publish their manifest on startup:
 
@@ -55,15 +55,17 @@ type LookupOrderOutput struct {
 	UserID string `json:"userId"`
 }
 
-err := toolworker.Handle(worker, "lookup_order", toolworker.Definition{
-	Version:     "1",
-	Description: "Look up an order by id.",
-}, func(ctx context.Context, call toolworker.TypedCall[LookupOrderInput]) (LookupOrderOutput, error) {
+lookupOrder, err := tool.Define[LookupOrderInput]("lookup_order", "1", "Look up an order by id.")
+if err != nil {
+	panic(err)
+}
+
+err = toolworker.Handle(worker, lookupOrder, func(ctx context.Context, call tool.Call[LookupOrderInput]) tool.Out {
 	if call.Input.OrderID == "" {
-		return LookupOrderOutput{}, toolworker.NewToolError("order.id_required", "order id is required", nil)
+		return tool.Err("order.id_required", "order id is required", nil)
 	}
 
-	return LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID}, nil
+	return tool.OK(LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID})
 })
 if err != nil {
 	panic(err)
@@ -99,7 +101,7 @@ publisher := toolworker.NewManifestPublisher(toolworker.PublisherConfig{
 	AgentAPIKey:     "...",
 })
 
-_, err := publisher.Publish(ctx, "crm", definitions)
+_, err := publisher.Publish(ctx, tool.Manifest{Namespace: "crm", Definitions: definitions})
 ```
 
 The runtime worker then uses `ManifestPublishNever`:

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/aimount/aimount-go/tool"
 )
 
 type client struct {
@@ -22,7 +24,7 @@ type client struct {
 type publishManifestRequest struct {
 	IfMatchManifestToken     *string                          `json:"ifMatchManifestToken,omitempty"`
 	ConflictResolutionPolicy ManifestConflictResolutionPolicy `json:"conflictResolutionPolicy,omitempty"`
-	Tools                    []Definition                     `json:"tools"`
+	Tools                    []tool.Definition                `json:"tools"`
 }
 
 type PublishManifestAck struct {
@@ -48,7 +50,7 @@ type claimedCall struct {
 	Version   string          `json:"version"`
 	Input     map[string]any  `json:"input"`
 	InputRaw  json.RawMessage `json:"-"`
-	Subject   Subject         `json:"subject"`
+	Subject   tool.Subject    `json:"subject"`
 }
 
 func (c *claimedCall) UnmarshalJSON(data []byte) error {
@@ -74,7 +76,7 @@ func (c *claimedCall) UnmarshalJSON(data []byte) error {
 
 type submitOutcomeRequest struct {
 	OutcomeToken string  `json:"outcomeToken"`
-	Outcome      Outcome `json:"outcome"`
+	Outcome      outcome `json:"outcome"`
 }
 
 type SubmitOutcomeAck struct {
@@ -85,7 +87,7 @@ type HeartbeatExecutorAck struct {
 	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 }
 
-func (c client) publishManifest(ctx context.Context, namespace string, definitions []Definition, options PublishOptions) (PublishManifestAck, error) {
+func (c client) publishManifest(ctx context.Context, namespace string, definitions []tool.Definition, options PublishOptions) (PublishManifestAck, error) {
 	var ack PublishManifestAck
 	policy := options.ConflictResolutionPolicy
 	if policy == "" {
@@ -124,7 +126,7 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 	return ack, err
 }
 
-func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome Outcome, key string) error {
+func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome outcome, key string) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/outcome", escape(c.agentID)), submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome}, nil, key)
 }
 
