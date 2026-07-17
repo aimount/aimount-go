@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +25,14 @@ type client struct {
 type publishManifestRequest struct {
 	IfMatchManifestToken     *string                          `json:"ifMatchManifestToken,omitempty"`
 	ConflictResolutionPolicy ManifestConflictResolutionPolicy `json:"conflictResolutionPolicy,omitempty"`
-	Tools                    []tool.Definition                `json:"tools"`
+	Tools                    []wireDefinition                 `json:"tools"`
+}
+
+type wireDefinition struct {
+	Name        string          `json:"name"`
+	Version     string          `json:"version"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
 type PublishManifestAck struct {
@@ -33,45 +41,24 @@ type PublishManifestAck struct {
 }
 
 type registerExecutorAck struct {
-	ExecutorToken          string `json:"executorToken"`
-	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
+	ExecutorToken          string
+	ExecutorTokenExpiresAt time.Time
 }
 
 type claimAck struct {
-	Kind           string      `json:"kind"`
-	OutcomeToken   string      `json:"outcomeToken"`
-	ClaimExpiresAt string      `json:"claimExpiresAt"`
-	ToolCall       claimedCall `json:"toolCall"`
+	Kind               string
+	OutcomeToken       string
+	ClaimExpiresAt     time.Time
+	ClaimExpiryIsValid bool
+	ToolCall           claimedCall
 }
 
 type claimedCall struct {
 	Namespace string          `json:"namespace"`
 	Name      string          `json:"name"`
 	Version   string          `json:"version"`
-	Input     map[string]any  `json:"input"`
-	InputRaw  json.RawMessage `json:"-"`
+	Input     json.RawMessage `json:"input"`
 	Subject   tool.Subject    `json:"subject"`
-}
-
-func (c *claimedCall) UnmarshalJSON(data []byte) error {
-	type claimedCallAlias claimedCall
-	var raw struct {
-		claimedCallAlias
-		Input json.RawMessage `json:"input"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*c = claimedCall(raw.claimedCallAlias)
-	c.Input = map[string]any{}
-	if len(raw.Input) == 0 || string(raw.Input) == "null" {
-		return nil
-	}
-	c.InputRaw = append(c.InputRaw[:0], raw.Input...)
-	if err := json.Unmarshal(raw.Input, &c.Input); err != nil {
-		return fmt.Errorf("decode tool call input: %w", err)
-	}
-	return nil
 }
 
 type submitOutcomeRequest struct {
@@ -80,19 +67,18 @@ type submitOutcomeRequest struct {
 }
 
 type SubmitOutcomeAck struct {
-	Recorded bool `json:"recorded"`
+	Recorded *bool `json:"recorded"`
 }
 
 type HeartbeatExecutorAck struct {
 	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 }
 
-func (c client) publishManifest(ctx context.Context, namespace string, definitions []tool.Definition, options PublishOptions) (PublishManifestAck, error) {
+type heartbeatExecutorAck struct{ ExecutorTokenExpiresAt time.Time }
+
+func (c client) publishManifest(ctx context.Context, namespace string, definitions []wireDefinition, options PublishOptions) (PublishManifestAck, error) {
 	var ack PublishManifestAck
 	policy := options.ConflictResolutionPolicy
-	if policy == "" {
-		policy = ManifestConflictReplaceIfTokenMatch
-	}
 	if policy == ManifestConflictReplace && options.IfMatchManifestToken != "" {
 		return ack, fmt.Errorf("ifMatchManifestToken is not allowed with replace conflict policy")
 	}
@@ -100,34 +86,82 @@ func (c client) publishManifest(ctx context.Context, namespace string, definitio
 	if options.IfMatchManifestToken != "" {
 		ifMatch = &options.IfMatchManifestToken
 	}
-	err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{IfMatchManifestToken: ifMatch, ConflictResolutionPolicy: policy, Tools: definitions}, &ack, "")
-	return ack, err
+	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{IfMatchManifestToken: ifMatch, ConflictResolutionPolicy: policy, Tools: definitions}, &ack, ""); err != nil {
+		return ack, err
+	}
+	if strings.TrimSpace(ack.ManifestToken) == "" || strings.TrimSpace(ack.ManifestHash) == "" {
+		return ack, protocolError{"toolworker: malformed manifest response"}
+	}
+	return ack, nil
 }
 
 func (c client) registerExecutor(ctx context.Context, namespaces []string) (registerExecutorAck, error) {
-	var ack registerExecutorAck
-	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/register", escape(c.agentID)), map[string]any{"namespaces": namespaces}, &ack, "")
-	return ack, err
+	var wire struct {
+		ExecutorToken          string `json:"executorToken"`
+		ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
+	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/register", escape(c.agentID)), map[string]any{"namespaces": namespaces}, &wire, ""); err != nil {
+		return registerExecutorAck{}, err
+	}
+	expires, err := time.Parse(time.RFC3339, wire.ExecutorTokenExpiresAt)
+	if strings.TrimSpace(wire.ExecutorToken) == "" || err != nil || !time.Now().Before(expires) {
+		return registerExecutorAck{}, protocolError{"toolworker: malformed registration response"}
+	}
+	return registerExecutorAck{ExecutorToken: wire.ExecutorToken, ExecutorTokenExpiresAt: expires}, nil
 }
 
-func (c client) heartbeatExecutor(ctx context.Context, executorToken string) (HeartbeatExecutorAck, error) {
-	var ack HeartbeatExecutorAck
-	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/heartbeat", escape(c.agentID)), map[string]any{"executorToken": executorToken}, &ack, "")
-	return ack, err
+func (c client) heartbeatExecutor(ctx context.Context, executorToken string) (heartbeatExecutorAck, error) {
+	var wire HeartbeatExecutorAck
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/heartbeat", escape(c.agentID)), map[string]any{"executorToken": executorToken}, &wire, ""); err != nil {
+		return heartbeatExecutorAck{}, err
+	}
+	expires, err := time.Parse(time.RFC3339, wire.ExecutorTokenExpiresAt)
+	if err != nil || !time.Now().Before(expires) {
+		return heartbeatExecutorAck{}, protocolError{"toolworker: malformed heartbeat response"}
+	}
+	return heartbeatExecutorAck{ExecutorTokenExpiresAt: expires}, nil
 }
 
 func (c client) claim(ctx context.Context, executorToken string, namespaces []string, key string) (claimAck, error) {
-	var ack claimAck
-	body := map[string]any{"executorToken": executorToken}
-	if len(namespaces) > 0 {
-		body["namespaces"] = namespaces
+	var wire struct {
+		Kind           string          `json:"kind"`
+		OutcomeToken   string          `json:"outcomeToken"`
+		ClaimExpiresAt json.RawMessage `json:"claimExpiresAt"`
+		ToolCall       claimedCall     `json:"toolCall"`
 	}
-	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/claim", escape(c.agentID)), body, &ack, key)
-	return ack, err
+	body := map[string]any{"executorToken": executorToken, "namespaces": namespaces}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/claim", escape(c.agentID)), body, &wire, key); err != nil {
+		return claimAck{}, err
+	}
+	var expiry string
+	expiryErr := json.Unmarshal(wire.ClaimExpiresAt, &expiry)
+	expires, parseErr := time.Parse(time.RFC3339, expiry)
+	ack := claimAck{Kind: wire.Kind, OutcomeToken: wire.OutcomeToken, ClaimExpiresAt: expires, ClaimExpiryIsValid: expiryErr == nil && parseErr == nil && time.Now().Before(expires), ToolCall: wire.ToolCall}
+	switch ack.Kind {
+	case "none":
+		if ack.OutcomeToken != "" || len(wire.ClaimExpiresAt) != 0 || ack.ToolCall.Namespace != "" || ack.ToolCall.Name != "" || ack.ToolCall.Version != "" || len(ack.ToolCall.Input) != 0 || ack.ToolCall.Subject.UserID != "" {
+			return ack, protocolError{"toolworker: malformed empty claim response"}
+		}
+		return ack, nil
+	case "claimed":
+		if strings.TrimSpace(ack.OutcomeToken) == "" || strings.TrimSpace(ack.ToolCall.Namespace) == "" || strings.TrimSpace(ack.ToolCall.Name) == "" || strings.TrimSpace(ack.ToolCall.Version) == "" || len(ack.ToolCall.Input) == 0 || strings.TrimSpace(ack.ToolCall.Subject.UserID) == "" {
+			return ack, protocolError{"toolworker: malformed claimed response"}
+		}
+		return ack, nil
+	default:
+		return ack, protocolError{"toolworker: malformed claim response"}
+	}
 }
 
 func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome outcome, key string) error {
-	return c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/outcome", escape(c.agentID)), submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome}, nil, key)
+	var ack SubmitOutcomeAck
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/outcome", escape(c.agentID)), submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome}, &ack, key); err != nil {
+		return err
+	}
+	if ack.Recorded == nil {
+		return protocolError{"toolworker: malformed outcome response: recorded must be boolean"}
+	}
+	return nil
 }
 
 func (c client) do(ctx context.Context, method string, path string, body any, result any, idempotencyKey string) error {
@@ -144,11 +178,7 @@ func (c client) do(ctx context.Context, method string, path string, body any, re
 	if idempotencyKey != "" {
 		req.Header.Set("idempotency-key", idempotencyKey)
 	}
-	httpClient := c.http
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -161,7 +191,24 @@ func (c client) do(ctx context.Context, method string, path string, body any, re
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(result)
+	if err := decodeJSON(resp.Body, result); err != nil {
+		return protocolError{fmt.Sprintf("toolworker: malformed successful response: %v", err)}
+	}
+	return nil
+}
+
+func decodeJSON(reader io.Reader, result any) error {
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(result); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("toolworker: trailing JSON response")
+		}
+		return fmt.Errorf("toolworker: trailing JSON response: %w", err)
+	}
+	return nil
 }
 
 func errorCode(body []byte) string {
