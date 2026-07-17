@@ -4,7 +4,8 @@ Go SDK packages for Aimount.
 
 ## Packages
 
-- `toolworker`: primitives for building Agent API server tool execution workers in Go.
+- `tool`: typed executable server tools and namespaces.
+- `toolworker`: Agent API namespace publication and execution workers.
 - `runtimeauth`: server-side helper for issuing Runtime API v2 user tokens from a Go backend.
 
 ## Runtime Auth Quickstart
@@ -33,19 +34,13 @@ _ = token.RuntimeToken
 
 ## Toolworker Quickstart
 
-`tool` lets a Go backend declare server tools and typed handler results. `toolworker` registers live executor availability, claims tool calls, runs handlers, and submits terminal outcomes.
+`tool` binds generated input schemas to typed handlers. `toolworker` registers live executor availability, claims calls, runs handlers, and submits outcomes.
 
-Local and demo workers can publish their manifest on startup:
+Tool inputs intentionally match Cloud's current flat schema subset: use a named struct with unique, named `string`, `bool`, `float32`, or `float64` JSON fields. `tool.New` rejects integers, nested or anonymous structs, pointers, collections, maps, interfaces, custom JSON, text, or schema hooks, invalid JSON tag names, case-fold-equivalent field names, and `json:",string"` fields. Execution requires exact case-sensitive property names and rejects duplicate keys.
+
+Schema tags may mark a field `required` and add `description` metadata. Other validation metadata is rejected because Cloud does not enforce it. Direct `Tool.Execute` enforces object shape, exact keys, duplicate-key rejection, and Go primitive decoding; Cloud enforces published required fields before worker claims, while handlers validate decoded domain values.
 
 ```go
-worker := toolworker.New(toolworker.Config{
-	BaseURL:               "https://api.aimount.dev",
-	AgentID:               "agent_123",
-	AgentAPIKey:           "...",
-	Namespace:             "crm",
-	ManifestPublishPolicy: toolworker.ManifestPublishOnStart,
-})
-
 type LookupOrderInput struct {
 	OrderID string `json:"orderId" jsonschema:"required,description=Order id"`
 }
@@ -55,23 +50,35 @@ type LookupOrderOutput struct {
 	UserID string `json:"userId"`
 }
 
-lookupOrder, err := tool.Define[LookupOrderInput]("lookup_order", "1", "Look up an order by id.")
-if err != nil {
-	panic(err)
-}
-
-err = toolworker.Handle(worker, lookupOrder, func(ctx context.Context, call tool.Call[LookupOrderInput]) tool.Out {
+lookupOrder, err := tool.New(tool.Metadata{
+	Name: "lookup_order", Version: "1", Description: "Look up an order by id.",
+}, func(ctx context.Context, call tool.Call[LookupOrderInput]) (LookupOrderOutput, error) {
 	if call.Input.OrderID == "" {
-		return tool.Err("order.id_required", "order id is required", nil)
+		return LookupOrderOutput{}, tool.NewError("order.id_required", "order id is required", nil)
 	}
-
-	return tool.OK(LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID})
+	return LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID}, nil
 })
 if err != nil {
 	panic(err)
 }
 
-if err := worker.Run(context.Background()); err != nil {
+crm, err := tool.NewNamespace("crm", lookupOrder)
+if err != nil {
+	panic(err)
+}
+
+worker, err := toolworker.New(toolworker.WorkerConfig{
+	Client: toolworker.ClientConfig{
+		BaseURL: "https://api.aimount.dev", AgentID: "agent_123", AgentAPIKey: "...",
+	},
+	MaxConcurrentCalls: 4,
+}, crm)
+if err != nil {
+	panic(err)
+}
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+if err := worker.Run(ctx); err != nil {
 	panic(err)
 }
 ```
@@ -81,44 +88,33 @@ if err := worker.Run(context.Background()); err != nil {
 Production deployments should keep desired catalog state separate from live worker availability.
 
 ```text
-cmd/publish-manifests
-  -> publishes namespace manifests during CI/CD or deploy
-  -> uses manifest-publish authority
+cmd/publish-tools
+  -> publishes namespaces during CI/CD or deploy
+  -> Agent API key scope: runtime:v2:tool:manifest
   -> exits
 
 cmd/tool-worker
-  -> runs with ManifestPublishNever
   -> registers executor availability
   -> heartbeats, claims, executes, submits outcomes
+  -> Agent API key scopes: runtime:v2:tool:executor, runtime:v2:tool:claim, runtime:v2:tool:outcome
 ```
 
-The manifest publisher can reuse the same definitions as the worker:
+The publisher and workers reuse the same executable namespace values. Publish one namespace per call:
 
 ```go
-publisher := toolworker.NewManifestPublisher(toolworker.PublisherConfig{
-	BaseURL:          "https://api.aimount.dev",
-	AgentID:          "agent_123",
-	AgentAPIKey:     "...",
+publisher, err := toolworker.NewPublisher(toolworker.ClientConfig{
+	BaseURL: "https://api.aimount.dev", AgentID: "agent_123", AgentAPIKey: "...",
 })
-
-_, err := publisher.Publish(ctx, tool.Manifest{Namespace: "crm", Definitions: definitions})
+if err != nil {
+	panic(err)
+}
+_, err = publisher.Publish(ctx, crm, toolworker.PublishOptions{})
 ```
 
-The runtime worker then uses `ManifestPublishNever`:
+Pass multiple namespaces to the same `toolworker.New` call, for example `toolworker.New(config, crm, billing)`. `MaxConcurrentCalls` remains one global limit across all namespaces.
 
-```go
-worker := toolworker.New(toolworker.Config{
-	BaseURL:               "https://api.aimount.dev",
-	AgentID:               "agent_123",
-	AgentAPIKey:           "...",
-	Namespace:             "crm",
-	ManifestPublishPolicy: toolworker.ManifestPublishNever,
-	MaxConcurrentCalls:    4,
-})
-```
+`Worker.Run` is one-shot. Cancel its context during shutdown to stop new claims and cancel active handler contexts. Handlers must observe context cancellation and finish promptly. Go cannot forcibly terminate an uncooperative handler goroutine: after its claim deadline the worker warns and may stop waiting during shutdown, but the goroutine continues and keeps its `MaxConcurrentCalls` slot until it exits.
 
 ## Boundaries
 
-`toolworker` does not provide Runtime session APIs, Console APIs, client/browser tool execution, per-call heartbeat, or operator/debug reads. Handlers should finish before their call deadline because the Agent API does not expose per-call heartbeat in the current MVP.
-
-The existing `services/go-tool-executor` repository is a local Runtime API v2 verification worker and sample consumer of `toolworker`. It is still verification-oriented, not a recommended production application template.
+`toolworker` does not provide Runtime session APIs, Console APIs, client/browser tool execution, per-call heartbeat, or operator/debug reads. Handlers should finish before their call deadline because the Agent API does not expose per-call heartbeat.

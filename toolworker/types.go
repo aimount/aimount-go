@@ -1,24 +1,26 @@
 package toolworker
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/aimount/aimount-go/tool"
 )
 
-type ManifestPublishPolicy string
-
 const (
-	ManifestPublishNever   ManifestPublishPolicy = "never"
-	ManifestPublishOnStart ManifestPublishPolicy = "on_start"
-
 	ManifestConflictReplaceIfTokenMatch ManifestConflictResolutionPolicy = "replace_if_token_match"
 	ManifestConflictReplace             ManifestConflictResolutionPolicy = "replace"
 )
+
+var errMalformedProtocol = errors.New("toolworker: malformed protocol response")
+
+type protocolError struct{ message string }
+
+func (e protocolError) Error() string { return e.message }
+func (e protocolError) Unwrap() error { return errMalformedProtocol }
 
 type ManifestConflictResolutionPolicy string
 
@@ -27,43 +29,20 @@ type PublishOptions struct {
 	ConflictResolutionPolicy ManifestConflictResolutionPolicy
 }
 
-type Logger interface {
-	Printf(format string, args ...any)
-}
-
-type Config struct {
-	BaseURL                string
-	AgentID                string
-	AgentAPIKey            string
-	Namespace              string
-	ManifestPublishPolicy  ManifestPublishPolicy
-	ManifestPublishOptions PublishOptions
-	HTTPClient             *http.Client
-	Logger                 Logger
-
-	MaxConcurrentCalls int
-	ClaimPollInterval  time.Duration
-	HeartbeatInterval  time.Duration
-	RefreshSkew        time.Duration
-}
-
-type PublisherConfig struct {
+type ClientConfig struct {
 	BaseURL     string
 	AgentID     string
 	AgentAPIKey string
 	HTTPClient  *http.Client
 }
 
-type handler func(context.Context, call) (outcome, error)
-
-type call struct {
-	Namespace string
-	Name      string
-	Version   string
-	Input     map[string]any
-	inputRaw  json.RawMessage
-	Subject   tool.Subject
-	Deadline  time.Time
+type WorkerConfig struct {
+	Client             ClientConfig
+	Logger             *slog.Logger
+	MaxConcurrentCalls int
+	ClaimPollInterval  time.Duration
+	HeartbeatInterval  time.Duration
+	RefreshSkew        time.Duration
 }
 
 type runtimeError struct {
@@ -83,14 +62,14 @@ type cancellation struct {
 }
 
 type outcome struct {
-	Status       string        `json:"status"`
-	Result       any           `json:"result,omitempty"`
-	Error        *runtimeError `json:"error,omitempty"`
-	Denial       *denial       `json:"denial,omitempty"`
-	Cancellation *cancellation `json:"cancellation,omitempty"`
+	Status       string          `json:"status"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	Error        *runtimeError   `json:"error,omitempty"`
+	Denial       *denial         `json:"denial,omitempty"`
+	Cancellation *cancellation   `json:"cancellation,omitempty"`
 }
 
-func succeeded(result any) outcome {
+func succeeded(result json.RawMessage) outcome {
 	return outcome{Status: "succeeded", Result: result}
 }
 
@@ -99,7 +78,7 @@ func failed(code string, message string, details map[string]any) outcome {
 }
 
 func internalFailure() outcome {
-	return failed(tool.InternalErrorCode, tool.InternalErrorMessage, nil)
+	return failed(tool.UnknownErrorCode, tool.UnknownErrorMessage, nil)
 }
 
 type APIError struct {
@@ -118,6 +97,9 @@ func (e APIError) Error() string {
 
 func IsRetryable(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, errMalformedProtocol) {
 		return false
 	}
 	var apiErr APIError
