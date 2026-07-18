@@ -6,7 +6,7 @@ Go SDK packages for Aimount.
 
 - `tool`: typed executable server tools and namespaces.
 - `toolworker`: Agent API namespace publication and execution workers.
-- `runtimeauth`: server-side helper for issuing Runtime API v2 user tokens from a Go backend.
+- `runtimeauth`: server-side helper for issuing Agent API runtime user tokens from a Go backend.
 
 ## Runtime Auth Quickstart
 
@@ -90,13 +90,13 @@ Production deployments should keep desired catalog state separate from live work
 ```text
 cmd/publish-tools
   -> publishes namespaces during CI/CD or deploy
-  -> Agent API key scope: runtime:v2:tool:manifest
+  -> Agent API key scope: agent:tool:manifest
   -> exits
 
 cmd/tool-worker
   -> registers executor availability
   -> heartbeats, claims, executes, submits outcomes
-  -> Agent API key scopes: runtime:v2:tool:executor, runtime:v2:tool:claim, runtime:v2:tool:outcome
+  -> Agent API key scopes: agent:tool:executor, agent:tool:claim, agent:tool:outcome
 ```
 
 The publisher and workers reuse the same executable namespace values. Publish one namespace per call:
@@ -117,4 +117,4 @@ Pass multiple namespaces to the same `toolworker.New` call, for example `toolwor
 
 ## Boundaries
 
-`toolworker` does not provide Runtime session APIs, Console APIs, client/browser tool execution, per-call heartbeat, or operator/debug reads. Handlers should finish before their call deadline because the Agent API does not expose per-call heartbeat.
+`toolworker` does not provide Agent session APIs, Console APIs, client/browser tool execution, per-call heartbeat, or operator/debug reads. Handlers should finish before their call deadline because the Agent API does not expose per-call heartbeat.

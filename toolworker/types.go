@@ -45,7 +45,7 @@ type WorkerConfig struct {
 	RefreshSkew        time.Duration
 }
 
-type runtimeError struct {
+type agentToolError struct {
 	Code    string         `json:"code"`
 	Message string         `json:"message"`
 	Details map[string]any `json:"details,omitempty"`
@@ -64,7 +64,7 @@ type cancellation struct {
 type outcome struct {
 	Status       string          `json:"status"`
 	Result       json.RawMessage `json:"result,omitempty"`
-	Error        *runtimeError   `json:"error,omitempty"`
+	Error        *agentToolError `json:"error,omitempty"`
 	Denial       *denial         `json:"denial,omitempty"`
 	Cancellation *cancellation   `json:"cancellation,omitempty"`
 }
@@ -74,7 +74,7 @@ func succeeded(result json.RawMessage) outcome {
 }
 
 func failed(code string, message string, details map[string]any) outcome {
-	return outcome{Status: "failed", Error: &runtimeError{Code: code, Message: message, Details: details}}
+	return outcome{Status: "failed", Error: &agentToolError{Code: code, Message: message, Details: details}}
 }
 
 func internalFailure() outcome {
