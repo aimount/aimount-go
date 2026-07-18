@@ -89,7 +89,7 @@ func TestIssueUserTokenValidatesRequiredFields(t *testing.T) {
 func TestIssueUserTokenAPIErrorAndRetryability(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"code":"unauthorized.runtime.v2.agent_api_key"}`))
+		_, _ = w.Write([]byte(`{"code":"unauthorized.agent.agent_api_key"}`))
 	}))
 	defer server.Close()
 
@@ -98,7 +98,7 @@ func TestIssueUserTokenAPIErrorAndRetryability(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("expected APIError, got %T %[1]v", err)
 	}
-	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/runtime/tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.runtime.v2.agent_api_key" {
+	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/runtime/tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.agent.agent_api_key" {
 		t.Fatalf("unexpected api error: %+v", apiErr)
 	}
 	if strings.Contains(apiErr.Error(), "awi_tst_secret") {
