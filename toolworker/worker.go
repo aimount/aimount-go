@@ -145,7 +145,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			resultDone := make(chan outcome, 1)
 			go func() {
 				defer func() { <-sem }()
-				resultDone <- w.execute(callCtx, identity{claim.ToolCall.Namespace, claim.ToolCall.Name, claim.ToolCall.Version}, claim.ToolCall.Input, claim.ToolCall.Subject)
+				resultDone <- w.execute(callCtx, identity{claim.ToolCall.Namespace, claim.ToolCall.Name, claim.ToolCall.Version}, claim.ToolCall.Input, claim.ToolCall.Subject, claim.ToolCall.Context)
 			}()
 			result, completed := awaitResult(resultDone, callCtx.Done())
 			if !completed {
@@ -194,13 +194,13 @@ func awaitResult(resultDone <-chan outcome, canceled <-chan struct{}) (outcome, 
 	}
 }
 
-func (w *Worker) execute(ctx context.Context, id identity, input json.RawMessage, subject tool.Subject) outcome {
+func (w *Worker) execute(ctx context.Context, id identity, input json.RawMessage, subject tool.Subject, callContext tool.CallContext) outcome {
 	serverTool, ok := w.tools[id]
 	if !ok {
 		w.config.Logger.Error("unknown tool identity", "namespace", id.namespace, "name", id.name, "version", id.version)
 		return internalFailure()
 	}
-	result, err := serverTool.Execute(ctx, input, subject)
+	result, err := serverTool.ExecuteWithContext(ctx, input, subject, callContext)
 	if err == nil {
 		return succeeded(result)
 	}

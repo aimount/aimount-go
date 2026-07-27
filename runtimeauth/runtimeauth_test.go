@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,10 +24,13 @@ func TestIssueUserTokenSendsRequestAndDecodesResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
+		if r.URL.EscapedPath() == "/agent/v1/agents/agent%2F1/runtime/tokens" {
+			t.Fatal("runtimeauth called deprecated runtime token route")
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"runtimeToken": "runtime.jwt",
-			"tokenType":    "Bearer",
-			"expiresAt":    expiresAt,
+			"accessToken": "runtime.jwt",
+			"tokenType":   "Bearer",
+			"expiresAt":   expiresAt,
 		})
 	}))
 	defer server.Close()
@@ -37,13 +41,13 @@ func TestIssueUserTokenSendsRequestAndDecodesResponse(t *testing.T) {
 		t.Fatalf("issue token: %v", err)
 	}
 
-	if method != http.MethodPost || path != "/agent/v1/agents/agent/1/runtime/tokens" {
+	if method != http.MethodPost || path != "/agent/v1/agents/agent/1/service/users/user_1/access-tokens" {
 		t.Fatalf("unexpected request %s %s", method, path)
 	}
 	if auth != "Bearer awi_tst_secret" {
 		t.Fatalf("unexpected auth header: %q", auth)
 	}
-	if body["profileId"] != "profile_1" || body["userId"] != "user_1" {
+	if len(body) != 1 || body["profileId"] != "profile_1" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 	if token.RuntimeToken != "runtime.jwt" || token.TokenType != "Bearer" {
@@ -76,13 +80,28 @@ func TestIssueUserTokenValidatesRequiredFields(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New(tt.config).IssueUserToken(context.Background(), tt.request)
-			if err == nil {
-				t.Fatal("expected validation error")
+			if err == nil || err.Error() != "runtimeauth: "+tt.name+" is required" {
+				t.Fatalf("error = %v", err)
 			}
 		})
 	}
 	if called {
 		t.Fatal("server should not be called for invalid inputs")
+	}
+}
+
+func TestIssueUserTokenPreservesExpiresAtDecodeErrorPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"accessToken":"token","tokenType":"Bearer","expiresAt":"later"}`))
+	}))
+	defer server.Close()
+	_, err := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "key"}).IssueUserToken(context.Background(), IssueUserTokenRequest{UserID: "user", ProfileID: "profile"})
+	if err == nil || !strings.HasPrefix(err.Error(), "runtimeauth: decode expiresAt: ") {
+		t.Fatalf("error = %v", err)
+	}
+	var parseErr *time.ParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("expected wrapped time.ParseError, got %T %[1]v", err)
 	}
 }
 
@@ -98,7 +117,7 @@ func TestIssueUserTokenAPIErrorAndRetryability(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("expected APIError, got %T %[1]v", err)
 	}
-	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/runtime/tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.agent.agent_api_key" {
+	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/service/users/user/access-tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.agent.agent_api_key" {
 		t.Fatalf("unexpected api error: %+v", apiErr)
 	}
 	if strings.Contains(apiErr.Error(), "awi_tst_secret") {
@@ -115,5 +134,20 @@ func TestIssueUserTokenAPIErrorAndRetryability(t *testing.T) {
 	}
 	if !IsRetryable(errors.New("network")) {
 		t.Fatal("transport errors should be retryable")
+	}
+	for _, err := range []error{
+		&APIError{StatusCode: http.StatusUnauthorized},
+		fmt.Errorf("wrapped: %w", &APIError{StatusCode: http.StatusUnauthorized}),
+	} {
+		if IsRetryable(err) {
+			t.Fatalf("pointer API error should not be retryable: %v", err)
+		}
+	}
+	if !IsRetryable(fmt.Errorf("wrapped: %w", &APIError{StatusCode: http.StatusBadGateway})) {
+		t.Fatal("wrapped pointer 5xx should be retryable")
+	}
+	var typedNil *APIError
+	if IsRetryable(typedNil) {
+		t.Fatal("typed-nil API error should not be retryable")
 	}
 }
