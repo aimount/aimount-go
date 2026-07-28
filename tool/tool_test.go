@@ -427,6 +427,45 @@ func TestExecuteDecodesTypedInputAndSerializesOutput(t *testing.T) {
 	}
 }
 
+func TestExecuteWithContextCopiesSessionLabels(t *testing.T) {
+	labels := map[string]string{"client_id": "client_1"}
+	var first, second Call[lookupOrderInput]
+	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(_ context.Context, call Call[lookupOrderInput]) (lookupOrderOutput, error) {
+		if first.Context.SessionLabels == nil {
+			first = call
+		} else {
+			second = call
+		}
+		return lookupOrderOutput{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callContext := CallContext{SessionLabels: labels}
+	_, err = serverTool.ExecuteWithContext(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{UserID: "user"}, callContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Context.SessionLabels["client_id"] = "mutated handler"
+	_, err = serverTool.ExecuteWithContext(context.Background(), json.RawMessage(`{"orderId":"ord_2"}`), Subject{UserID: "user"}, callContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Context.SessionLabels["client_id"] != "client_1" {
+		t.Fatalf("second labels = %#v", second.Context.SessionLabels)
+	}
+
+	var direct Call[lookupOrderInput]
+	directTool, _ := New(Metadata{Name: "direct", Version: "1", Description: "Direct"}, func(_ context.Context, call Call[lookupOrderInput]) (lookupOrderOutput, error) {
+		direct = call
+		return lookupOrderOutput{}, nil
+	})
+	_, _ = directTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{})
+	if len(direct.Context.SessionLabels) != 0 {
+		t.Fatalf("direct context = %#v", direct.Context)
+	}
+}
+
 func TestExecuteRejectsUnknownInputField(t *testing.T) {
 	called := false
 	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {

@@ -54,11 +54,12 @@ type claimAck struct {
 }
 
 type claimedCall struct {
-	Namespace string          `json:"namespace"`
-	Name      string          `json:"name"`
-	Version   string          `json:"version"`
-	Input     json.RawMessage `json:"input"`
-	Subject   tool.Subject    `json:"subject"`
+	Namespace string           `json:"namespace"`
+	Name      string           `json:"name"`
+	Version   string           `json:"version"`
+	Input     json.RawMessage  `json:"input"`
+	Subject   tool.Subject     `json:"subject"`
+	Context   tool.CallContext `json:"context"`
 }
 
 type submitOutcomeRequest struct {
@@ -139,7 +140,7 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 	ack := claimAck{Kind: wire.Kind, OutcomeToken: wire.OutcomeToken, ClaimExpiresAt: expires, ClaimExpiryIsValid: expiryErr == nil && parseErr == nil && time.Now().Before(expires), ToolCall: wire.ToolCall}
 	switch ack.Kind {
 	case "none":
-		if ack.OutcomeToken != "" || len(wire.ClaimExpiresAt) != 0 || ack.ToolCall.Namespace != "" || ack.ToolCall.Name != "" || ack.ToolCall.Version != "" || len(ack.ToolCall.Input) != 0 || ack.ToolCall.Subject.UserID != "" {
+		if ack.OutcomeToken != "" || len(wire.ClaimExpiresAt) != 0 || ack.ToolCall.Namespace != "" || ack.ToolCall.Name != "" || ack.ToolCall.Version != "" || len(ack.ToolCall.Input) != 0 || ack.ToolCall.Subject.UserID != "" || len(ack.ToolCall.Context.SessionLabels) != 0 {
 			return ack, protocolError{"toolworker: malformed empty claim response"}
 		}
 		return ack, nil

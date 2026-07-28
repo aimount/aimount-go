@@ -22,6 +22,10 @@ import (
 type input struct {
 	Value string `json:"value"`
 }
+type labeledInput struct {
+	Value    string `json:"value"`
+	ClientID string `json:"clientId,omitempty"`
+}
 type output struct {
 	Value string `json:"value"`
 }
@@ -327,6 +331,44 @@ func TestWorkerUsesAllNamespacesAndRoutesFullIdentity(t *testing.T) {
 	}
 }
 
+func TestWorkerUsesTrustedClaimLabelsInsteadOfModelInput(t *testing.T) {
+	var submitted submitOutcomeRequest
+	ctx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/register"):
+			writeRegistration(w, "token", time.Now().Add(time.Hour))
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			_, _ = fmt.Fprintf(w, `{"kind":"claimed","outcomeToken":"out","claimExpiresAt":%q,"toolCall":{"namespace":"crm","name":"authorize","version":"1","input":{"value":"x","clientId":"attacker"},"subject":{"userId":"user"},"context":{"sessionLabels":{"client_id":"trusted"}},"future":true}}`, time.Now().Add(time.Second).Format(time.RFC3339Nano))
+		case strings.HasSuffix(r.URL.Path, "/outcome"):
+			_ = json.NewDecoder(r.Body).Decode(&submitted)
+			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			cancel()
+		}
+	}))
+	defer server.Close()
+
+	serverTool, err := tool.New(tool.Metadata{Name: "authorize", Version: "1", Description: "Authorize"}, func(_ context.Context, call tool.Call[labeledInput]) (output, error) {
+		if call.Context.SessionLabels["client_id"] != "trusted" {
+			return output{Value: "denied"}, nil
+		}
+		return output{Value: "allowed:trusted"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", serverTool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if string(submitted.Outcome.Result) != `{"value":"allowed:trusted"}` {
+		t.Fatalf("outcome = %s", submitted.Outcome.Result)
+	}
+}
+
 func TestSuccessfulOutcomePreservesExactJSONResult(t *testing.T) {
 	var wire []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -365,7 +407,7 @@ func TestClaimPreservesNullInputAndExecutionRejectsIt(t *testing.T) {
 	}
 	called := false
 	w, _ := New(WorkerConfig{Client: config("https://example.com")}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { called = true; return output{}, nil })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, claim.ToolCall.Input, tool.Subject{})
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, claim.ToolCall.Input, tool.Subject{}, tool.CallContext{})
 	if called || got.Error == nil {
 		t.Fatalf("called=%v outcome=%+v", called, got)
 	}
@@ -504,6 +546,7 @@ func TestClaimValidatesSuccessfulResponse(t *testing.T) {
 		{"none input", `{"kind":"none","toolCall":{"input":{}}}`, false},
 		{"none subject", `{"kind":"none","toolCall":{"subject":{"userId":"user"}}}`, false},
 		{"claimed", validClaimed, true},
+		{"claimed context", strings.Replace(validClaimed, `"subject":{"userId":"user"}`, `"subject":{"userId":"user"},"context":{"sessionLabels":{"client_id":"client"}}`, 1), true},
 		{"missing kind", `{}`, false},
 		{"unknown kind", `{"kind":"other"}`, false},
 		{"missing outcome", strings.Replace(validClaimed, `"outcomeToken":"out",`, "", 1), false},
@@ -686,9 +729,9 @@ func TestWorkerMapsErrorsSafelyAndLogsOnlyInternalFailures(t *testing.T) {
 			return output{}, errors.New("database secret")
 		}),
 	))
-	public := w.execute(context.Background(), identity{"crm", "public", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{UserID: "u"})
-	internal := w.execute(context.Background(), identity{"crm", "internal", "1"}, json.RawMessage(`{"value":"secret input"}`), tool.Subject{UserID: "u"})
-	unknown := w.execute(context.Background(), identity{"crm", "missing", "1"}, json.RawMessage(`{"password":"secret"}`), tool.Subject{})
+	public := w.execute(context.Background(), identity{"crm", "public", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{UserID: "u"}, tool.CallContext{})
+	internal := w.execute(context.Background(), identity{"crm", "internal", "1"}, json.RawMessage(`{"value":"secret input"}`), tool.Subject{UserID: "u"}, tool.CallContext{})
+	unknown := w.execute(context.Background(), identity{"crm", "missing", "1"}, json.RawMessage(`{"password":"secret"}`), tool.Subject{}, tool.CallContext{})
 	if public.Error.Code != "safe" || public.Error.Details["x"] != json.Number("1") {
 		t.Fatalf("public = %+v", public)
 	}
@@ -713,7 +756,7 @@ func TestWorkerRedactsOrdinaryHandlerError(t *testing.T) {
 		}),
 	))
 
-	w.execute(context.Background(), identity{"crm", "lookup", "7"}, json.RawMessage(`{"value":"x"}`), tool.Subject{UserID: "user_42"})
+	w.execute(context.Background(), identity{"crm", "lookup", "7"}, json.RawMessage(`{"value":"x"}`), tool.Subject{UserID: "user_42"}, tool.CallContext{})
 	text := logs.String()
 	for _, leaked := range strings.Fields(secret) {
 		if strings.Contains(text, leaked) {
@@ -913,7 +956,7 @@ func TestExecutionFailureMappingAndLogging(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", executable(t, "work", "1", tt.handler)))
-			got := w.execute(context.Background(), identity{"crm", "work", "1"}, tt.raw, tool.Subject{UserID: "u"})
+			got := w.execute(context.Background(), identity{"crm", "work", "1"}, tt.raw, tool.Subject{UserID: "u"}, tool.CallContext{})
 			if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
 				t.Fatalf("outcome=%+v", got)
 			}
@@ -932,7 +975,7 @@ func TestExecutionFailureMappingAndLogging(t *testing.T) {
 		t.Fatal(err)
 	}
 	w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", encodeTool))
-	got := w.execute(context.Background(), identity{"crm", "encode", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{})
+	got := w.execute(context.Background(), identity{"crm", "encode", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
 	if got.Error == nil || !strings.Contains(logs.String(), "encode output") {
 		t.Fatalf("outcome=%+v log=%s", got, logs.String())
 	}
@@ -1023,7 +1066,7 @@ func TestOutcomeRequiresExplicitRecordedBoolean(t *testing.T) {
 func TestTypedNilToolErrorMapsSafely(t *testing.T) {
 	var publicErr *tool.Error
 	w, _ := New(WorkerConfig{Client: config("https://example.com")}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, publicErr })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{})
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
 	if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
 		t.Fatalf("outcome=%+v", got)
 	}
@@ -1032,7 +1075,7 @@ func TestTypedNilToolErrorMapsSafely(t *testing.T) {
 func TestBlankPublicToolErrorMapsToUnknownWithoutDetails(t *testing.T) {
 	handlerErr := &tool.Error{}
 	w, _ := New(WorkerConfig{Client: config("https://example.com")}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, handlerErr })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{})
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
 	if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
 		t.Fatalf("outcome=%+v", got)
 	}
@@ -1042,7 +1085,7 @@ func TestTypedNilOrdinaryErrorMapsSafely(t *testing.T) {
 	var handlerErr *nilReceiverError
 	var logs bytes.Buffer
 	w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, handlerErr })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{})
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
 	if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || logs.Len() != 0 {
 		t.Fatalf("outcome=%+v logs=%q", got, logs.String())
 	}

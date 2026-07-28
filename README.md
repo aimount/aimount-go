@@ -6,20 +6,21 @@ Go SDK packages for Aimount.
 
 - `tool`: typed executable server tools and namespaces.
 - `toolworker`: Agent API namespace publication and execution workers.
-- `runtimeauth`: server-side helper for issuing Agent API runtime user tokens from a Go backend.
+- `serviceauth`: server-side helper for issuing Agent User access tokens from a Go backend.
+- `runtimeauth`: deprecated source-compatible facade for `serviceauth`.
 
-## Runtime Auth Quickstart
+## Service Auth Quickstart
 
-`runtimeauth` lets a trusted Go backend request a short-lived runtime user token for an end user of the client product.
+`serviceauth` lets a trusted Go backend request a short-lived Agent User access token for an end user of the client product.
 
 ```go
-issuer := runtimeauth.New(runtimeauth.Config{
+issuer := serviceauth.New(serviceauth.Config{
 	BaseURL:      "https://api.aimount.dev",
 	AgentID:      "agent_123",
 	AgentAPIKey: "...",
 })
 
-token, err := issuer.IssueUserToken(context.Background(), runtimeauth.IssueUserTokenRequest{
+token, err := issuer.IssueUserAccessToken(context.Background(), serviceauth.IssueUserAccessTokenRequest{
 	ProfileID: "profile_123",
 	UserID:    "user_from_client_product",
 })
@@ -27,10 +28,12 @@ if err != nil {
 	panic(err)
 }
 
-_ = token.RuntimeToken
+_ = token.AccessToken
 ```
 
-`AgentAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user runtime clients; send only the issued runtime user token payload to those clients.
+`AgentAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user clients; send only the issued Agent User access token payload to those clients.
+
+Existing `runtimeauth` imports remain source-compatible but are deprecated. They use the canonical Service API route and map `AccessToken` to the legacy `UserToken.RuntimeToken` field.
 
 ## Toolworker Quickstart
 
@@ -55,6 +58,9 @@ lookupOrder, err := tool.New(tool.Metadata{
 }, func(ctx context.Context, call tool.Call[LookupOrderInput]) (LookupOrderOutput, error) {
 	if call.Input.OrderID == "" {
 		return LookupOrderOutput{}, tool.NewError("order.id_required", "order id is required", nil)
+	}
+	if call.Context.SessionLabels["client_id"] == "" {
+		return LookupOrderOutput{}, tool.NewError("client.required", "trusted client context is required", nil)
 	}
 	return LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID}, nil
 })

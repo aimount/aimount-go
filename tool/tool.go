@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"reflect"
 	"runtime/debug"
 	"strings"
@@ -55,16 +56,21 @@ type Subject struct {
 	UserID string `json:"userId"`
 }
 
+type CallContext struct {
+	SessionLabels map[string]string
+}
+
 type Call[Input any] struct {
 	Input   Input
 	Subject Subject
+	Context CallContext
 }
 
 type Handler[Input, Output any] func(context.Context, Call[Input]) (Output, error)
 
 type Tool struct {
 	definition Definition
-	execute    func(context.Context, json.RawMessage, Subject) (json.RawMessage, error)
+	execute    func(context.Context, json.RawMessage, Subject, CallContext) (json.RawMessage, error)
 }
 
 func New[Input, Output any](metadata Metadata, handler Handler[Input, Output]) (Tool, error) {
@@ -80,7 +86,7 @@ func New[Input, Output any](metadata Metadata, handler Handler[Input, Output]) (
 		version:     metadata.Version,
 		description: metadata.Description,
 		inputSchema: schema,
-	}, execute: func(ctx context.Context, input json.RawMessage, subject Subject) (output json.RawMessage, err error) {
+	}, execute: func(ctx context.Context, input json.RawMessage, subject Subject, callContext CallContext) (output json.RawMessage, err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				err = fmt.Errorf("tool: handler panic: %v\n%s", recovered, debug.Stack())
@@ -101,7 +107,7 @@ func New[Input, Output any](metadata Metadata, handler Handler[Input, Output]) (
 		if decoder.Decode(&struct{}{}) != io.EOF {
 			return nil, errors.New("tool: decode input: trailing JSON")
 		}
-		result, err := handler(ctx, Call[Input]{Input: decoded, Subject: subject})
+		result, err := handler(ctx, Call[Input]{Input: decoded, Subject: subject, Context: CallContext{SessionLabels: maps.Clone(callContext.SessionLabels)}})
 		if err != nil {
 			return nil, err
 		}
@@ -119,7 +125,14 @@ func (t Tool) Execute(ctx context.Context, input json.RawMessage, subject Subjec
 	if t.execute == nil {
 		return nil, errors.New("tool: invalid tool")
 	}
-	return t.execute(ctx, input, subject)
+	return t.execute(ctx, input, subject, CallContext{})
+}
+
+func (t Tool) ExecuteWithContext(ctx context.Context, input json.RawMessage, subject Subject, callContext CallContext) (json.RawMessage, error) {
+	if t.execute == nil {
+		return nil, errors.New("tool: invalid tool")
+	}
+	return t.execute(ctx, input, subject, callContext)
 }
 
 type Error struct {
