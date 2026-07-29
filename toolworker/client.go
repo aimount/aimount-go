@@ -1,17 +1,16 @@
 package toolworker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/aimount/aimount-go/internal/httpjson"
 	"github.com/aimount/aimount-go/tool"
 )
 
@@ -67,11 +66,11 @@ type submitOutcomeRequest struct {
 	Outcome      outcome `json:"outcome"`
 }
 
-type SubmitOutcomeAck struct {
+type submitOutcomeAck struct {
 	Recorded *bool `json:"recorded"`
 }
 
-type HeartbeatExecutorAck struct {
+type heartbeatExecutorAckWire struct {
 	ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 }
 
@@ -87,7 +86,7 @@ func (c client) publishManifest(ctx context.Context, namespace string, definitio
 	if options.IfMatchManifestToken != "" {
 		ifMatch = &options.IfMatchManifestToken
 	}
-	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/tool/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{IfMatchManifestToken: ifMatch, ConflictResolutionPolicy: policy, Tools: definitions}, &ack, ""); err != nil {
+	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/agent/v1/agents/%s/server/tools/namespaces/%s/manifest", escape(c.agentID), escape(namespace)), publishManifestRequest{IfMatchManifestToken: ifMatch, ConflictResolutionPolicy: policy, Tools: definitions}, &ack, ""); err != nil {
 		return ack, err
 	}
 	if strings.TrimSpace(ack.ManifestToken) == "" || strings.TrimSpace(ack.ManifestHash) == "" {
@@ -101,7 +100,7 @@ func (c client) registerExecutor(ctx context.Context, namespaces []string) (regi
 		ExecutorToken          string `json:"executorToken"`
 		ExecutorTokenExpiresAt string `json:"executorTokenExpiresAt"`
 	}
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/register", escape(c.agentID)), map[string]any{"namespaces": namespaces}, &wire, ""); err != nil {
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/server/tools/executors/register", escape(c.agentID)), map[string]any{"namespaces": namespaces}, &wire, ""); err != nil {
 		return registerExecutorAck{}, err
 	}
 	expires, err := time.Parse(time.RFC3339, wire.ExecutorTokenExpiresAt)
@@ -112,8 +111,8 @@ func (c client) registerExecutor(ctx context.Context, namespaces []string) (regi
 }
 
 func (c client) heartbeatExecutor(ctx context.Context, executorToken string) (heartbeatExecutorAck, error) {
-	var wire HeartbeatExecutorAck
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/executors/heartbeat", escape(c.agentID)), map[string]any{"executorToken": executorToken}, &wire, ""); err != nil {
+	var wire heartbeatExecutorAckWire
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/server/tools/executors/heartbeat", escape(c.agentID)), map[string]any{"executorToken": executorToken}, &wire, ""); err != nil {
 		return heartbeatExecutorAck{}, err
 	}
 	expires, err := time.Parse(time.RFC3339, wire.ExecutorTokenExpiresAt)
@@ -131,7 +130,7 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 		ToolCall       claimedCall     `json:"toolCall"`
 	}
 	body := map[string]any{"executorToken": executorToken, "namespaces": namespaces}
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/claim", escape(c.agentID)), body, &wire, key); err != nil {
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/server/tools/claim", escape(c.agentID)), body, &wire, key); err != nil {
 		return claimAck{}, err
 	}
 	var expiry string
@@ -155,8 +154,8 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 }
 
 func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome outcome, key string) error {
-	var ack SubmitOutcomeAck
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/tool/server/outcome", escape(c.agentID)), submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome}, &ack, key); err != nil {
+	var ack submitOutcomeAck
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/server/tools/outcome", escape(c.agentID)), submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome}, &ack, key); err != nil {
 		return err
 	}
 	if ack.Recorded == nil {
@@ -166,66 +165,18 @@ func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome 
 }
 
 func (c client) do(ctx context.Context, method string, path string, body any, result any, idempotencyKey string) error {
-	encoded, err := json.Marshal(body)
+	requestErr, err := httpjson.Do(ctx, c.http, method, c.baseURL, path, c.token, idempotencyKey, body, result)
 	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.baseURL, "/")+path, bytes.NewReader(encoded))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+c.token)
-	if idempotencyKey != "" {
-		req.Header.Set("idempotency-key", idempotencyKey)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return APIError{Method: method, Path: path, StatusCode: resp.StatusCode, Code: errorCode(responseBody)}
-	}
-	if result == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil
-	}
-	if err := decodeJSON(resp.Body, result); err != nil {
-		return protocolError{fmt.Sprintf("toolworker: malformed successful response: %v", err)}
-	}
-	return nil
-}
-
-func decodeJSON(reader io.Reader, result any) error {
-	decoder := json.NewDecoder(reader)
-	if err := decoder.Decode(result); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return errors.New("toolworker: trailing JSON response")
+		var decodeErr httpjson.DecodeError
+		if errors.As(err, &decodeErr) {
+			return protocolError{fmt.Sprintf("toolworker: malformed successful response: %v", err)}
 		}
-		return fmt.Errorf("toolworker: trailing JSON response: %w", err)
+		return err
+	}
+	if requestErr != nil {
+		return APIError{Method: method, Path: path, StatusCode: requestErr.StatusCode, Code: requestErr.Code}
 	}
 	return nil
-}
-
-func errorCode(body []byte) string {
-	var envelope struct {
-		Error *struct {
-			Code string `json:"code"`
-		} `json:"error"`
-		Code string `json:"code"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return ""
-	}
-	if envelope.Error != nil {
-		return envelope.Error.Code
-	}
-	return envelope.Code
 }
 
 func escape(segment string) string { return url.PathEscape(segment) }

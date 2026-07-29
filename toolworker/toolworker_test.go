@@ -106,7 +106,7 @@ func TestDefaultMaintenanceStepHeartbeatsStandardRegistration(t *testing.T) {
 			registers.Add(1)
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			heartbeats.Add(1)
-			_ = json.NewEncoder(w).Encode(HeartbeatExecutorAck{ExecutorTokenExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano)})
+			_ = json.NewEncoder(w).Encode(heartbeatExecutorAckWire{ExecutorTokenExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano)})
 		}
 	}))
 	defer server.Close()
@@ -125,7 +125,7 @@ func TestDefaultMaintenanceStepHeartbeatsStandardRegistration(t *testing.T) {
 func TestPublisherPublishesGeneratedNamespace(t *testing.T) {
 	var body publishManifestRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/agent/v1/agents/agent/tool/namespaces/crm/manifest" {
+		if r.URL.Path != "/agent/v1/agents/agent/server/tools/namespaces/crm/manifest" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -149,6 +149,55 @@ func TestPublisherPublishesGeneratedNamespace(t *testing.T) {
 	}
 	if body.IfMatchManifestToken != nil || body.ConflictResolutionPolicy != "" {
 		t.Fatalf("zero options changed: %+v", body)
+	}
+}
+
+func TestExecutorRequestsUseCanonicalServerToolPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		call func(client) error
+	}{
+		{"register", "/agent/v1/agents/agent%2F1/server/tools/executors/register", func(c client) error {
+			_, err := c.registerExecutor(context.Background(), []string{"crm"})
+			return err
+		}},
+		{"heartbeat", "/agent/v1/agents/agent%2F1/server/tools/executors/heartbeat", func(c client) error {
+			_, err := c.heartbeatExecutor(context.Background(), "executor")
+			return err
+		}},
+		{"claim", "/agent/v1/agents/agent%2F1/server/tools/claim", func(c client) error {
+			_, err := c.claim(context.Background(), "executor", []string{"crm"}, "key")
+			return err
+		}},
+		{"outcome", "/agent/v1/agents/agent%2F1/server/tools/outcome", func(c client) error {
+			return c.submitOutcome(context.Background(), "outcome", succeeded(nil), "key")
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.EscapedPath() != tt.path {
+					t.Fatalf("request = %s %s", r.Method, r.URL.EscapedPath())
+				}
+				switch tt.name {
+				case "register":
+					writeRegistration(w, "executor", time.Now().Add(time.Hour))
+				case "heartbeat":
+					_ = json.NewEncoder(w).Encode(heartbeatExecutorAckWire{ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano)})
+				case "claim":
+					_, _ = io.WriteString(w, `{"kind":"none"}`)
+				case "outcome":
+					_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
+				}
+			}))
+			defer server.Close()
+
+			if err := tt.call(client{baseURL: server.URL, agentID: "agent/1", token: "key", http: server.Client()}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -305,7 +354,7 @@ func TestWorkerUsesAllNamespacesAndRoutesFullIdentity(t *testing.T) {
 			var body submitOutcomeRequest
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			outcomes <- body
-			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 		}
 	}))
 	defer server.Close()
@@ -342,7 +391,7 @@ func TestWorkerUsesTrustedClaimLabelsInsteadOfModelInput(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"kind":"claimed","outcomeToken":"out","claimExpiresAt":%q,"toolCall":{"namespace":"crm","name":"authorize","version":"1","input":{"value":"x","clientId":"attacker"},"subject":{"userId":"user"},"context":{"sessionLabels":{"client_id":"trusted"}},"future":true}}`, time.Now().Add(time.Second).Format(time.RFC3339Nano))
 		case strings.HasSuffix(r.URL.Path, "/outcome"):
 			_ = json.NewDecoder(r.Body).Decode(&submitted)
-			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 			cancel()
 		}
 	}))
@@ -379,7 +428,7 @@ func TestSuccessfulOutcomePreservesExactJSONResult(t *testing.T) {
 			writeClaim(w, "out", time.Now().Add(time.Second), "crm", "exact", "1", `{"value":"x"}`, "user")
 		case strings.HasSuffix(r.URL.Path, "/outcome"):
 			wire, _ = io.ReadAll(r.Body)
-			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 		}
 	}))
 	defer server.Close()
@@ -419,7 +468,7 @@ func TestAPIClientRejectsTrailingSuccessfulJSON(t *testing.T) {
 	}))
 	defer server.Close()
 	c := client{baseURL: server.URL, agentID: "agent", token: "key", http: server.Client()}
-	if err := c.do(context.Background(), http.MethodPost, "/response", map[string]any{}, &SubmitOutcomeAck{}, ""); err == nil {
+	if err := c.do(context.Background(), http.MethodPost, "/response", map[string]any{}, &submitOutcomeAck{}, ""); err == nil {
 		t.Fatal("expected trailing response JSON error")
 	}
 }
@@ -603,7 +652,7 @@ func TestWorkerSubmitsSafeOutcomeForInvalidClaimDeadline(t *testing.T) {
 						t.Errorf("decode outcome: %v", err)
 					}
 					outcomeReceived <- request
-					_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+					_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 					cancel()
 				}
 			}))
@@ -780,7 +829,7 @@ func TestWorkerCancellationAndOneShotLifecycle(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/claim"):
 			writeClaim(w, "out", time.Now().Add(time.Second), "crm", "wait", "1", `{"value":"x"}`, "user")
 		case strings.HasSuffix(r.URL.Path, "/outcome"):
-			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 		}
 	}))
 	defer server.Close()
@@ -845,7 +894,7 @@ func TestGlobalConcurrency(t *testing.T) {
 			}
 			writeClaim(w, fmt.Sprint(n), time.Now().Add(time.Second), ns, "work", "1", `{"value":"x"}`, "user")
 		case strings.HasSuffix(r.URL.Path, "/outcome"):
-			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 		}
 	}))
 	defer server.Close()
@@ -892,7 +941,7 @@ func TestExpiredUncooperativeHandlerKeepsConcurrencySlot(t *testing.T) {
 			n := claims.Add(1)
 			writeClaim(w, fmt.Sprint(n), time.Now().Add(50*time.Millisecond), "crm", "work", "1", fmt.Sprintf(`{"value":%q}`, fmt.Sprint(n)), "user")
 		case strings.HasSuffix(r.URL.Path, "/outcome"):
-			_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+			_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 		}
 	}))
 	defer server.Close()
@@ -1022,7 +1071,7 @@ func TestOutcomeRetryPreservesIdempotencyKey(t *testing.T) {
 			http.Error(w, `{"code":"temporary"}`, http.StatusBadGateway)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(true)})
+		_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 	}))
 	defer server.Close()
 	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
@@ -1038,7 +1087,7 @@ func TestOutcomeRecordedFalseIsIdempotentSuccess(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		_ = json.NewEncoder(w).Encode(SubmitOutcomeAck{Recorded: boolPointer(false)})
+		_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(false)})
 	}))
 	defer server.Close()
 	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
@@ -1110,7 +1159,7 @@ func TestHeartbeatAndRefreshUseAllNamespaces(t *testing.T) {
 			writeRegistration(w, fmt.Sprint(n), expiry)
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			heartbeats.Add(1)
-			_ = json.NewEncoder(w).Encode(HeartbeatExecutorAck{ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano)})
+			_ = json.NewEncoder(w).Encode(heartbeatExecutorAckWire{ExecutorTokenExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano)})
 		case strings.HasSuffix(r.URL.Path, "/claim"):
 			_, _ = io.WriteString(w, `{"kind":"none"}`)
 		}

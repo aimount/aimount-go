@@ -6,21 +6,20 @@ Go SDK packages for Aimount.
 
 - `tool`: typed executable server tools and namespaces.
 - `toolworker`: Agent API namespace publication and execution workers.
-- `serviceauth`: server-side helper for issuing Agent User access tokens from a Go backend.
-- `runtimeauth`: deprecated source-compatible facade for `serviceauth`.
+- `agent`: Server API client for issuing Agent User access tokens from a Go backend.
 
-## Service Auth Quickstart
+## Agent Quickstart
 
-`serviceauth` lets a trusted Go backend request a short-lived Agent User access token for an end user of the client product.
+`agent` lets a trusted Go backend request a short-lived Agent User access token for an end user of the client product.
 
 ```go
-issuer := serviceauth.New(serviceauth.Config{
+issuer := agent.New(agent.Config{
 	BaseURL:      "https://api.aimount.dev",
 	AgentID:      "agent_123",
 	AgentAPIKey: "...",
 })
 
-token, err := issuer.IssueUserAccessToken(context.Background(), serviceauth.IssueUserAccessTokenRequest{
+token, err := issuer.IssueUserAccessToken(context.Background(), agent.IssueUserAccessTokenRequest{
 	ProfileID: "profile_123",
 	UserID:    "user_from_client_product",
 })
@@ -33,7 +32,7 @@ _ = token.AccessToken
 
 `AgentAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user clients; send only the issued Agent User access token payload to those clients.
 
-Existing `runtimeauth` imports remain source-compatible but are deprecated. They use the canonical Service API route and map `AccessToken` to the legacy `UserToken.RuntimeToken` field.
+To migrate, replace `github.com/aimount/aimount-go/serviceauth` or `github.com/aimount/aimount-go/runtimeauth` imports with `github.com/aimount/aimount-go/agent`. `serviceauth` symbols keep the same names under `agent`; `runtimeauth.UserToken.RuntimeToken` becomes `agent.UserAccessToken.AccessToken`. The removed packages have no compatibility facades.
 
 ## Toolworker Quickstart
 

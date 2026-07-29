@@ -505,6 +505,21 @@ func TestExecuteRequiresExactUniqueInputKeys(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsNullScalarInput(t *testing.T) {
+	called := false
+	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+		called = true
+		return lookupOrderOutput{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":null}`), Subject{}); err == nil || called {
+		t.Fatalf("err=%v called=%v", err, called)
+	}
+}
+
 func TestExecuteRejectsTrailingJSON(t *testing.T) {
 	called := false
 	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
@@ -518,38 +533,6 @@ func TestExecuteRejectsTrailingJSON(t *testing.T) {
 	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"} {"orderId":"ord_2"}`), Subject{})
 	if err == nil || called {
 		t.Fatalf("err = %v, called = %v", err, called)
-	}
-}
-
-func TestValidateInputKeysAcceptsScalarValues(t *testing.T) {
-	large := strings.Repeat("x", 1<<20)
-	for _, input := range []string{
-		`{"text":"exact","enabled":true,"score":-1.25e+30}`,
-		`{"text":"` + large + `"}`,
-	} {
-		if err := validateInputKeys(json.RawMessage(input), map[string]struct{}{"text": {}, "enabled": {}, "score": {}}); err != nil {
-			t.Fatalf("input rejected: %v", err)
-		}
-	}
-}
-
-func TestValidateInputKeysRejectsInvalidInput(t *testing.T) {
-	allowed := map[string]struct{}{"text": {}, "enabled": {}, "score": {}}
-	for _, input := range []string{
-		`null`,
-		`[]`,
-		`{"text":null}`,
-		`{"text":{}}`,
-		`{"text":[]}`,
-		`{"text":"value"`,
-		`{"text":"value"} {}`,
-		`{"text":"one","te\u0078t":"two"}`,
-		`{"Text":"value"}`,
-		`{"unknown":"value"}`,
-	} {
-		if err := validateInputKeys(json.RawMessage(input), allowed); err == nil {
-			t.Fatalf("input accepted: %s", input)
-		}
 	}
 }
 
