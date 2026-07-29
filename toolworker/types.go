@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/aimount/aimount-go/internal/httpjson"
 	"github.com/aimount/aimount-go/tool"
 )
 
@@ -106,5 +107,5 @@ func IsRetryable(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return true
 	}
-	return apiErr.StatusCode == http.StatusRequestTimeout || apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= 500
+	return httpjson.RetryableStatus(apiErr.StatusCode)
 }

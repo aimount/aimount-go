@@ -105,7 +105,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			claimKey = idempotencyKey("claim", nonce, executorToken, fmt.Sprint(attempt))
 			claimToken = executorToken
 		}
-		claim, claimErr := w.claimWithRetry(runCtx, executorToken, claimKey)
+		claim, claimErr := w.client.claim(runCtx, executorToken, w.namespaces, claimKey)
+		if w.afterClaim != nil {
+			w.afterClaim()
+		}
 		if claimErr != nil {
 			<-sem
 			if runCtx.Err() != nil {
@@ -231,23 +234,6 @@ func isNilError(err error) bool {
 		return value.IsNil()
 	default:
 		return false
-	}
-}
-
-func (w *Worker) claimWithRetry(ctx context.Context, token, key string) (claimAck, error) {
-	retried := false
-	for {
-		claim, err := w.client.claim(ctx, token, w.namespaces, key)
-		if w.afterClaim != nil {
-			w.afterClaim()
-		}
-		if err == nil || !IsRetryable(err) || retried {
-			return claim, err
-		}
-		retried = true
-		if !sleep(ctx, w.config.ClaimPollInterval) {
-			return claim, ctx.Err()
-		}
 	}
 }
 
