@@ -47,7 +47,7 @@ func TestIssueUserAccessTokenUsesCanonicalServerRoute(t *testing.T) {
 func TestIssueUserAccessTokenPreservesErrorsRetryAndSecretSafety(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized.agent.agent_api_key"}}`))
+		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized.agent.agent_api_key.invalid"}}`))
 	}))
 	defer server.Close()
 
@@ -56,7 +56,7 @@ func TestIssueUserAccessTokenPreservesErrorsRetryAndSecretSafety(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("error = %T %v", err, err)
 	}
-	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/server/users/user/access-tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.agent.agent_api_key" {
+	if apiErr.Method != http.MethodPost || apiErr.Path != "/agent/v1/agents/agent/server/users/user/access-tokens" || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized.agent.agent_api_key.invalid" {
 		t.Fatalf("API error = %+v", apiErr)
 	}
 	if strings.Contains(err.Error(), "secret-value") {

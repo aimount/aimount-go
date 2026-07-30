@@ -225,6 +225,55 @@ func TestExecutorRequestsUseCanonicalServerToolPaths(t *testing.T) {
 	}
 }
 
+func TestClaimOmitsAbsentNamespacesAndPreservesExplicitFilter(t *testing.T) {
+	requests := make(chan map[string]json.RawMessage, 3)
+	decodeErrors := make(chan error, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			decodeErrors <- err
+			return
+		}
+		decodeErrors <- nil
+		requests <- body
+		_, _ = io.WriteString(w, `{"kind":"none"}`)
+	}))
+	defer server.Close()
+	c := client{baseURL: server.URL, agentID: "agent", token: "key", http: server.Client()}
+
+	if _, err := c.claim(context.Background(), "executor", nil, "key-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-decodeErrors; err != nil {
+		t.Fatal(err)
+	}
+	if body := <-requests; body != nil {
+		if _, ok := body["namespaces"]; ok {
+			t.Fatalf("absent namespaces encoded as %s", body["namespaces"])
+		}
+	}
+
+	if _, err := c.claim(context.Background(), "executor", []string{}, "key-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-decodeErrors; err != nil {
+		t.Fatal(err)
+	}
+	if body := <-requests; string(body["namespaces"]) != `[]` {
+		t.Fatalf("explicit empty namespaces = %s", body["namespaces"])
+	}
+
+	if _, err := c.claim(context.Background(), "executor", []string{"crm", "billing"}, "key-3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-decodeErrors; err != nil {
+		t.Fatal(err)
+	}
+	if body := <-requests; string(body["namespaces"]) != `["crm","billing"]` {
+		t.Fatalf("explicit namespaces = %s", body["namespaces"])
+	}
+}
+
 func TestPublisherRejectsMultipleVersionsAndInvalidOptions(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
@@ -357,8 +406,9 @@ func TestShutdownStopsWaitingAtClaimDeadline(t *testing.T) {
 	}
 }
 
-func TestWorkerUsesAllNamespacesAndRoutesFullIdentity(t *testing.T) {
-	var registerNamespaces, claimNamespaces []string
+func TestWorkerRegistersAllNamespacesAndOmitsClaimFilter(t *testing.T) {
+	var registerNamespaces []string
+	var claimHasNamespaces bool
 	outcomes := make(chan submitOutcomeRequest, 2)
 	var claims atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -371,11 +421,9 @@ func TestWorkerUsesAllNamespacesAndRoutesFullIdentity(t *testing.T) {
 			registerNamespaces = body.Namespaces
 			writeRegistration(w, "awi_tex_exec", time.Now().Add(time.Hour))
 		case strings.HasSuffix(r.URL.Path, "/claim"):
-			var body struct {
-				Namespaces []string `json:"namespaces"`
-			}
+			var body map[string]json.RawMessage
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			claimNamespaces = body.Namespaces
+			_, claimHasNamespaces = body["namespaces"]
 			n := claims.Add(1)
 			ns, version := "crm", "1"
 			if n == 2 {
@@ -400,8 +448,8 @@ func TestWorkerUsesAllNamespacesAndRoutesFullIdentity(t *testing.T) {
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(registerNamespaces, ",") != "crm,billing" || strings.Join(claimNamespaces, ",") != "crm,billing" {
-		t.Fatalf("namespaces register=%v claim=%v", registerNamespaces, claimNamespaces)
+	if strings.Join(registerNamespaces, ",") != "crm,billing" || claimHasNamespaces {
+		t.Fatalf("namespaces register=%v claimHasNamespaces=%v", registerNamespaces, claimHasNamespaces)
 	}
 	for range 2 {
 		select {
@@ -1117,7 +1165,33 @@ func TestOutcomeRetryPreservesIdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestOutcomeRecordedFalseIsIdempotentSuccess(t *testing.T) {
+func TestOutcomeAcceptsExplicitRecordedBoolean(t *testing.T) {
+	for _, response := range []string{`{"recorded":true}`, `{"recorded":false}`} {
+		t.Run(response, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+			err := (client{baseURL: server.URL, agentID: "agent", token: "key", http: server.Client()}).submitOutcome(context.Background(), "out", internalFailure(), "key")
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestOutcomeRejectsNoContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	err := (client{baseURL: server.URL, agentID: "agent", token: "key", http: server.Client()}).submitOutcome(context.Background(), "out", internalFailure(), "key")
+	if err == nil || IsRetryable(err) || !errors.Is(err, errMalformedProtocol) {
+		t.Fatalf("err=%v retryable=%v", err, IsRetryable(err))
+	}
+}
+
+func TestOutcomeRecordedFalseUsesBoundedSuccessPath(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -1132,7 +1206,7 @@ func TestOutcomeRecordedFalseIsIdempotentSuccess(t *testing.T) {
 }
 
 func TestOutcomeRequiresExplicitRecordedBoolean(t *testing.T) {
-	for _, response := range []string{`{}`, `{"recorded":null}`} {
+	for _, response := range []string{`{}`, `{"recorded":null}`, `{"recorded":"true"}`} {
 		t.Run(response, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = io.WriteString(w, response)
