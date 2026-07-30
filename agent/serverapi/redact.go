@@ -1,4 +1,4 @@
-package toolworker
+package serverapi
 
 import "regexp"
 
@@ -9,7 +9,7 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sha256:[A-Za-z0-9_-]+`),
 }
 
-func Redact(input string) string {
+func redact(input string) string {
 	output := input
 	for _, pattern := range secretPatterns {
 		output = pattern.ReplaceAllString(output, "[redacted]")

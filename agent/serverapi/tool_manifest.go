@@ -1,4 +1,4 @@
-package toolworker
+package serverapi
 
 import (
 	"context"
@@ -9,25 +9,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aimount/aimount-go/tool"
+	"github.com/aimount/aimount-go/agent"
 )
 
 var (
-	ErrInvalidBaseURL       = errors.New("toolworker: invalid base URL")
-	ErrMissingAgentID       = errors.New("toolworker: agent ID required")
-	ErrMissingAgentAPIKey   = errors.New("toolworker: agent API key required")
-	ErrMultipleToolVersions = errors.New("toolworker: multiple tool versions")
-	ErrNamespaceRequired    = errors.New("toolworker: namespace required")
-	ErrInvalidNamespace     = errors.New("toolworker: invalid namespace")
-	ErrDuplicateNamespace   = errors.New("toolworker: duplicate namespace")
-	ErrWorkerAlreadyRun     = errors.New("toolworker: worker already run")
+	ErrInvalidBaseURL       = errors.New("serverapi: invalid base URL")
+	ErrMissingAgentID       = errors.New("serverapi: agent ID required")
+	ErrMissingAgentAPIKey   = errors.New("serverapi: agent API key required")
+	ErrMultipleToolVersions = errors.New("serverapi: multiple tool versions")
+	ErrNamespaceRequired    = errors.New("serverapi: namespace required")
+	ErrInvalidNamespace     = errors.New("serverapi: invalid namespace")
+	ErrDuplicateNamespace   = errors.New("serverapi: duplicate namespace")
+	ErrWorkerAlreadyRun     = errors.New("serverapi: worker already run")
 )
 
-type Publisher struct {
-	client client
-}
-
-func newClient(config ClientConfig) (client, error) {
+func newClient(config Config) (client, error) {
 	u, err := url.Parse(config.BaseURL)
 	if err != nil || u.IsAbs() == false || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return client{}, fmt.Errorf("%w: %q", ErrInvalidBaseURL, config.BaseURL)
@@ -45,27 +41,22 @@ func newClient(config ClientConfig) (client, error) {
 	return client{baseURL: strings.TrimRight(config.BaseURL, "/"), agentID: config.AgentID, token: config.AgentAPIKey, http: httpClient}, nil
 }
 
-func NewPublisher(config ClientConfig) (*Publisher, error) {
-	c, err := newClient(config)
-	if err != nil {
-		return nil, err
+func (c *Client) PublishToolManifest(ctx context.Context, namespace agent.ToolNamespace, options PublishToolManifestOptions) (PublishedToolManifest, error) {
+	if c == nil {
+		return PublishedToolManifest{}, errors.New("serverapi: client is required")
 	}
-	return &Publisher{client: c}, nil
-}
-
-func (p *Publisher) Publish(ctx context.Context, namespace tool.Namespace, options PublishOptions) (PublishManifestAck, error) {
 	if namespace.Name() == "" || len(namespace.Tools()) == 0 {
-		return PublishManifestAck{}, ErrInvalidNamespace
+		return PublishedToolManifest{}, ErrInvalidNamespace
 	}
 	seen := map[string]struct{}{}
 	definitions := make([]wireDefinition, 0, len(namespace.Tools()))
 	for _, serverTool := range namespace.Tools() {
 		d := serverTool.Definition()
 		if _, ok := seen[d.Name()]; ok {
-			return PublishManifestAck{}, fmt.Errorf("%w: %s", ErrMultipleToolVersions, d.Name())
+			return PublishedToolManifest{}, fmt.Errorf("%w: %s", ErrMultipleToolVersions, d.Name())
 		}
 		seen[d.Name()] = struct{}{}
 		definitions = append(definitions, wireDefinition{Name: d.Name(), Version: d.Version(), Description: d.Description(), InputSchema: d.InputSchema()})
 	}
-	return p.client.publishManifest(ctx, namespace.Name(), definitions, options)
+	return c.client.publishManifest(ctx, namespace.Name(), definitions, options)
 }

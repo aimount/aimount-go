@@ -1,10 +1,11 @@
-package agent
+package serverapi
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,7 +32,7 @@ func TestIssueUserAccessTokenUsesCanonicalServerRoute(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := New(Config{BaseURL: server.URL, AgentID: "agent/1", AgentAPIKey: "awi_tst_secret"}).IssueUserAccessToken(context.Background(), IssueUserAccessTokenRequest{UserID: "user/1", ProfileID: "profile_1"})
+	token, err := mustClient(t, Config{BaseURL: server.URL, AgentID: "agent/1", AgentAPIKey: "awi_tst_secret"}).IssueClientAPIAccessToken(context.Background(), IssueClientAPIAccessTokenParams{UserID: "user/1", ProfileID: "profile_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +51,8 @@ func TestIssueUserAccessTokenPreservesErrorsRetryAndSecretSafety(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "secret-value"}).IssueUserAccessToken(context.Background(), IssueUserAccessTokenRequest{UserID: "user", ProfileID: "profile"})
-	var apiErr APIError
+	_, err := mustClient(t, Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "secret-value"}).IssueClientAPIAccessToken(context.Background(), IssueClientAPIAccessTokenParams{UserID: "user", ProfileID: "profile"})
+	var apiErr Error
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("error = %T %v", err, err)
 	}
@@ -61,11 +62,29 @@ func TestIssueUserAccessTokenPreservesErrorsRetryAndSecretSafety(t *testing.T) {
 	if strings.Contains(err.Error(), "secret-value") {
 		t.Fatalf("error leaked credential: %v", err)
 	}
-	if IsRetryable(err) || !IsRetryable(APIError{StatusCode: 429}) || !IsRetryable(APIError{StatusCode: 502}) || !IsRetryable(errors.New("network")) || IsRetryable(nil) {
+	if IsRetryable(err) || !IsRetryable(Error{StatusCode: 429}) || !IsRetryable(Error{StatusCode: 502}) || !IsRetryable(net.UnknownNetworkError("network")) || IsRetryable(nil) {
 		t.Fatal("retry classification changed")
 	}
-	if IsRetryable(fmt.Errorf("wrapped: %w", &APIError{StatusCode: http.StatusUnauthorized})) {
+	if IsRetryable(fmt.Errorf("wrapped: %w", &Error{StatusCode: http.StatusUnauthorized})) {
 		t.Fatal("wrapped 401 should not be retryable")
+	}
+	pointerErr := fmt.Errorf("wrapped: %w", &Error{StatusCode: http.StatusTooManyRequests, Code: "rate_limited"})
+	if ErrorCode(pointerErr) != "rate_limited" || HTTPStatus(pointerErr) != http.StatusTooManyRequests {
+		t.Fatal("pointer API error helpers changed")
+	}
+}
+
+func TestIsRetryableRejectsPermanentLocalErrors(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		ErrInvalidBaseURL,
+		ErrWorkerAlreadyRun,
+		errors.New("local validation failed"),
+	} {
+		if IsRetryable(err) {
+			t.Fatalf("%T %v is retryable", err, err)
+		}
 	}
 }
 
@@ -73,22 +92,27 @@ func TestIssueUserAccessTokenValidatesAndParsesResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		cfg  Config
-		req  IssueUserAccessTokenRequest
+		req  IssueClientAPIAccessTokenParams
 	}{
-		{"base URL", Config{AgentID: "a", AgentAPIKey: "k"}, IssueUserAccessTokenRequest{UserID: "u", ProfileID: "p"}},
-		{"agent ID", Config{BaseURL: "https://example.com", AgentAPIKey: "k"}, IssueUserAccessTokenRequest{UserID: "u", ProfileID: "p"}},
-		{"API key", Config{BaseURL: "https://example.com", AgentID: "a"}, IssueUserAccessTokenRequest{UserID: "u", ProfileID: "p"}},
-		{"user ID", Config{BaseURL: "https://example.com", AgentID: "a", AgentAPIKey: "k"}, IssueUserAccessTokenRequest{ProfileID: "p"}},
-		{"profile ID", Config{BaseURL: "https://example.com", AgentID: "a", AgentAPIKey: "k"}, IssueUserAccessTokenRequest{UserID: "u"}},
+		{"base URL", Config{AgentID: "a", AgentAPIKey: "k"}, IssueClientAPIAccessTokenParams{UserID: "u", ProfileID: "p"}},
+		{"agent ID", Config{BaseURL: "https://example.com", AgentAPIKey: "k"}, IssueClientAPIAccessTokenParams{UserID: "u", ProfileID: "p"}},
+		{"API key", Config{BaseURL: "https://example.com", AgentID: "a"}, IssueClientAPIAccessTokenParams{UserID: "u", ProfileID: "p"}},
+		{"user ID", Config{BaseURL: "https://example.com", AgentID: "a", AgentAPIKey: "k"}, IssueClientAPIAccessTokenParams{ProfileID: "p"}},
+		{"profile ID", Config{BaseURL: "https://example.com", AgentID: "a", AgentAPIKey: "k"}, IssueClientAPIAccessTokenParams{UserID: "u"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := New(tc.cfg).IssueUserAccessToken(context.Background(), tc.req); err == nil || !strings.HasPrefix(err.Error(), "agent: ") {
+			client, err := New(tc.cfg)
+			if err == nil {
+				_, err = client.IssueClientAPIAccessToken(context.Background(), tc.req)
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), "serverapi: ") {
 				t.Fatalf("error = %v", err)
 			}
 		})
 	}
 
 	for _, response := range []string{
+		`{`,
 		`{"accessToken":"","tokenType":"Bearer","expiresAt":"2026-06-18T10:15:00Z"}`,
 		`{"accessToken":"token","tokenType":"Basic","expiresAt":"2026-06-18T10:15:00Z"}`,
 		`{"accessToken":"token","tokenType":"Bearer","expiresAt":"later"}`,
@@ -96,7 +120,7 @@ func TestIssueUserAccessTokenValidatesAndParsesResponses(t *testing.T) {
 		t.Run(response, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(response)) }))
 			defer server.Close()
-			if _, err := New(Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "key"}).IssueUserAccessToken(context.Background(), IssueUserAccessTokenRequest{UserID: "user", ProfileID: "profile"}); err == nil {
+			if _, err := mustClient(t, Config{BaseURL: server.URL, AgentID: "agent", AgentAPIKey: "key"}).IssueClientAPIAccessToken(context.Background(), IssueClientAPIAccessTokenParams{UserID: "user", ProfileID: "profile"}); err == nil || IsRetryable(err) {
 				t.Fatal("expected malformed response error")
 			}
 		})

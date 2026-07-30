@@ -1,4 +1,4 @@
-package toolworker
+package serverapi
 
 import (
 	"context"
@@ -12,24 +12,23 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aimount/aimount-go/tool"
+	"github.com/aimount/aimount-go/agent"
 )
 
 type identity struct{ namespace, name, version string }
 
-type Worker struct {
-	config     WorkerConfig
+type ToolWorker struct {
+	config     ToolWorkerOptions
 	client     client
 	namespaces []string
-	tools      map[identity]tool.Tool
+	tools      map[identity]agent.Tool
 	run        atomic.Bool
 	afterClaim func()
 }
 
-func New(config WorkerConfig, namespaces ...tool.Namespace) (*Worker, error) {
-	c, err := newClient(config.Client)
-	if err != nil {
-		return nil, err
+func NewToolWorker(api *Client, config ToolWorkerOptions, namespaces ...agent.ToolNamespace) (*ToolWorker, error) {
+	if api == nil {
+		return nil, errors.New("serverapi: client is required")
 	}
 	if len(namespaces) == 0 {
 		return nil, ErrNamespaceRequired
@@ -49,7 +48,7 @@ func New(config WorkerConfig, namespaces ...tool.Namespace) (*Worker, error) {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	w := &Worker{config: config, client: c, tools: make(map[identity]tool.Tool)}
+	w := &ToolWorker{config: config, client: api.client, tools: make(map[identity]agent.Tool)}
 	seen := map[string]struct{}{}
 	for _, ns := range namespaces {
 		if ns.Name() == "" || len(ns.Tools()) == 0 {
@@ -68,7 +67,7 @@ func New(config WorkerConfig, namespaces ...tool.Namespace) (*Worker, error) {
 	return w, nil
 }
 
-func (w *Worker) Run(ctx context.Context) error {
+func (w *ToolWorker) Run(ctx context.Context) error {
 	if !w.run.CompareAndSwap(false, true) {
 		return ErrWorkerAlreadyRun
 	}
@@ -114,7 +113,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			if runCtx.Err() != nil {
 				break
 			}
-			w.config.Logger.Error("claim failed", "error", Redact(claimErr.Error()))
+			w.config.Logger.Error("claim failed", "error", redact(claimErr.Error()))
 			if !IsRetryable(claimErr) {
 				claimKey = ""
 			}
@@ -134,7 +133,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				err := w.submitOutcomeWithRetry(outcomeCtx, claim.OutcomeToken, internalFailure(), claim.ClaimExpiresAt)
 				cancelOutcome()
 				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-					w.config.Logger.Error("outcome failed", "error", Redact(err.Error()))
+					w.config.Logger.Error("outcome failed", "error", redact(err.Error()))
 				}
 			}
 			<-sem
@@ -168,7 +167,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			outcomeCtx, cancelOutcome := outcomeContext(claim.ClaimExpiresAt)
 			defer cancelOutcome()
 			if err := w.submitOutcomeWithRetry(outcomeCtx, claim.OutcomeToken, result, claim.ClaimExpiresAt); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				w.config.Logger.Error("outcome failed", "error", Redact(err.Error()))
+				w.config.Logger.Error("outcome failed", "error", redact(err.Error()))
 			}
 		}(claim)
 	}
@@ -197,20 +196,20 @@ func awaitResult(resultDone <-chan outcome, canceled <-chan struct{}) (outcome, 
 	}
 }
 
-func (w *Worker) execute(ctx context.Context, id identity, input json.RawMessage, subject tool.Subject, callContext tool.CallContext) outcome {
+func (w *ToolWorker) execute(ctx context.Context, id identity, input json.RawMessage, subject agent.ToolSubject, callContext agent.ToolCallContext) outcome {
 	serverTool, ok := w.tools[id]
 	if !ok {
 		w.config.Logger.Error("unknown tool identity", "namespace", id.namespace, "name", id.name, "version", id.version)
 		return internalFailure()
 	}
-	result, err := serverTool.ExecuteWithContext(ctx, input, subject, callContext)
+	result, err := serverTool.ExecuteWithTrustedContext(ctx, input, subject, callContext)
 	if err == nil {
 		return succeeded(result)
 	}
 	if isNilError(err) {
 		return internalFailure()
 	}
-	var public *tool.Error
+	var public *agent.ToolError
 	if errors.As(err, &public) {
 		if public == nil {
 			return internalFailure()
@@ -222,7 +221,7 @@ func (w *Worker) execute(ctx context.Context, id identity, input json.RawMessage
 		return failed(code, message, public.Details())
 	}
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		w.config.Logger.Error("tool execution failed", "namespace", id.namespace, "name", id.name, "version", id.version, "user_id", subject.UserID, "error", Redact(err.Error()), "error_type", fmt.Sprintf("%T", err))
+		w.config.Logger.Error("tool execution failed", "namespace", id.namespace, "name", id.name, "version", id.version, "user_id", subject.UserID, "error", redact(err.Error()), "error_type", fmt.Sprintf("%T", err))
 	}
 	return internalFailure()
 }
@@ -237,8 +236,11 @@ func isNilError(err error) bool {
 	}
 }
 
-func (w *Worker) heartbeatLoop(ctx context.Context, registration *registerExecutorAck, mu *sync.RWMutex) {
-	timer := time.NewTimer(w.config.HeartbeatInterval)
+func (w *ToolWorker) heartbeatLoop(ctx context.Context, registration *registerExecutorAck, mu *sync.RWMutex) {
+	mu.RLock()
+	expires := registration.ExecutorTokenExpiresAt
+	mu.RUnlock()
+	timer := time.NewTimer(maintenanceDelay(time.Now(), expires, w.config.HeartbeatInterval, w.config.RefreshSkew))
 	defer timer.Stop()
 	for {
 		select {
@@ -246,12 +248,26 @@ func (w *Worker) heartbeatLoop(ctx context.Context, registration *registerExecut
 			return
 		case <-timer.C:
 			w.maintainRegistration(ctx, registration, mu)
-			timer.Reset(w.config.HeartbeatInterval)
+			mu.RLock()
+			expires = registration.ExecutorTokenExpiresAt
+			mu.RUnlock()
+			timer.Reset(maintenanceDelay(time.Now(), expires, w.config.HeartbeatInterval, w.config.RefreshSkew))
 		}
 	}
 }
 
-func (w *Worker) maintainRegistration(ctx context.Context, registration *registerExecutorAck, mu *sync.RWMutex) {
+func maintenanceDelay(now, expires time.Time, heartbeatInterval, refreshSkew time.Duration) time.Duration {
+	delay := expires.Add(-refreshSkew).Sub(now)
+	if delay <= 0 {
+		return min(time.Second, heartbeatInterval)
+	}
+	if delay < heartbeatInterval {
+		return delay
+	}
+	return heartbeatInterval
+}
+
+func (w *ToolWorker) maintainRegistration(ctx context.Context, registration *registerExecutorAck, mu *sync.RWMutex) {
 	mu.RLock()
 	token, expires := registration.ExecutorToken, registration.ExecutorTokenExpiresAt
 	mu.RUnlock()
@@ -261,11 +277,11 @@ func (w *Worker) maintainRegistration(ctx context.Context, registration *registe
 			*registration = fresh
 			mu.Unlock()
 		} else if ctx.Err() == nil {
-			w.config.Logger.Error("register executor failed", "error", Redact(err.Error()))
+			w.config.Logger.Error("register executor failed", "error", redact(err.Error()))
 		}
 	} else if heartbeat, err := w.client.heartbeatExecutor(ctx, token); err != nil {
 		if ctx.Err() == nil {
-			w.config.Logger.Error("heartbeat failed", "error", Redact(err.Error()))
+			w.config.Logger.Error("heartbeat failed", "error", redact(err.Error()))
 		}
 	} else if !heartbeat.ExecutorTokenExpiresAt.IsZero() {
 		mu.Lock()
@@ -274,7 +290,7 @@ func (w *Worker) maintainRegistration(ctx context.Context, registration *registe
 	}
 }
 
-func (w *Worker) submitOutcomeWithRetry(ctx context.Context, token string, result outcome, deadline time.Time) error {
+func (w *ToolWorker) submitOutcomeWithRetry(ctx context.Context, token string, result outcome, deadline time.Time) error {
 	key := idempotencyKey("outcome", token)
 	for {
 		err := w.client.submitOutcome(ctx, token, result, key)

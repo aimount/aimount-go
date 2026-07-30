@@ -1,4 +1,4 @@
-package tool
+package agent
 
 import (
 	"context"
@@ -160,12 +160,12 @@ type validPunctuationTagInput struct {
 	Value string `json:"!#$%&()*+-./:;<=>?@[]^_{|}~ name"`
 }
 
-func lookupOrderHandler(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+func lookupOrderHandler(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 	return lookupOrderOutput{Status: "paid"}, nil
 }
 
 func TestNewDerivesStrictReadOnlyDefinition(t *testing.T) {
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, lookupOrderHandler)
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, lookupOrderHandler)
 	if err != nil {
 		t.Fatalf("new tool: %v", err)
 	}
@@ -188,100 +188,100 @@ func TestNewDerivesStrictReadOnlyDefinition(t *testing.T) {
 func TestNewValidatesMetadataAndInput(t *testing.T) {
 	tests := []struct {
 		name     string
-		metadata Metadata
+		metadata ToolMetadata
 		want     error
 	}{
-		{name: "name", metadata: Metadata{Version: "1", Description: "description"}, want: ErrInvalidMetadata},
-		{name: "version", metadata: Metadata{Name: "name", Description: "description"}, want: ErrInvalidMetadata},
-		{name: "description", metadata: Metadata{Name: "name", Version: "1"}, want: ErrInvalidMetadata},
+		{name: "name", metadata: ToolMetadata{Version: "1", Description: "description"}, want: ErrInvalidToolMetadata},
+		{name: "version", metadata: ToolMetadata{Name: "name", Description: "description"}, want: ErrInvalidToolMetadata},
+		{name: "description", metadata: ToolMetadata{Name: "name", Version: "1"}, want: ErrInvalidToolMetadata},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.metadata, lookupOrderHandler)
+			_, err := NewTool(tt.metadata, lookupOrderHandler)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want errors.Is(_, %v)", err, tt.want)
 			}
 		})
 	}
 
-	_, err := New(Metadata{Name: "bad", Version: "1", Description: "Bad"}, func(context.Context, Call[string]) (string, error) {
+	_, err := NewTool(ToolMetadata{Name: "bad", Version: "1", Description: "Bad"}, func(context.Context, ToolCall[string]) (string, error) {
 		return "", nil
 	})
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("error = %v, want errors.Is(_, ErrInvalidInput)", err)
+	if !errors.Is(err, ErrInvalidToolInput) {
+		t.Fatalf("error = %v, want errors.Is(_, ErrInvalidToolInput)", err)
 	}
 }
 
 func TestNewRejectsCustomJSONInputDecoding(t *testing.T) {
-	if _, err := New(Metadata{Name: "root", Version: "1", Description: "root"}, func(context.Context, Call[customRootInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "root", Version: "1", Description: "root"}, func(context.Context, ToolCall[customRootInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("root error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "nested", Version: "1", Description: "nested"}, func(context.Context, Call[inputWithCustomNested]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "nested", Version: "1", Description: "nested"}, func(context.Context, ToolCall[inputWithCustomNested]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("nested error = %v", err)
 	}
 }
 
 func TestNewRejectsRecursiveInputTypes(t *testing.T) {
-	if _, err := New(Metadata{Name: "recursive", Version: "1", Description: "recursive"}, func(context.Context, Call[recursiveInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "recursive", Version: "1", Description: "recursive"}, func(context.Context, ToolCall[recursiveInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("recursive error = %v", err)
 	}
 }
 
 func TestNewRejectsJSONStringTagOption(t *testing.T) {
-	_, err := New(Metadata{Name: "tagged", Version: "1", Description: "tagged"}, func(context.Context, Call[stringTaggedInput]) (struct{}, error) { return struct{}{}, nil })
-	if !errors.Is(err, ErrInvalidInput) {
+	_, err := NewTool(ToolMetadata{Name: "tagged", Version: "1", Description: "tagged"}, func(context.Context, ToolCall[stringTaggedInput]) (struct{}, error) { return struct{}{}, nil })
+	if !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 func TestNewSkipsJSONIgnoredInputFields(t *testing.T) {
-	_, err := New(Metadata{Name: "ignored", Version: "1", Description: "ignored"}, func(context.Context, Call[ignoredCustomInput]) (struct{}, error) { return struct{}{}, nil })
+	_, err := NewTool(ToolMetadata{Name: "ignored", Version: "1", Description: "ignored"}, func(context.Context, ToolCall[ignoredCustomInput]) (struct{}, error) { return struct{}{}, nil })
 	if err != nil {
 		t.Fatalf("ignored fields: %v", err)
 	}
 }
 
 func TestNewValidatesPromotedFieldsFromUnexportedEmbeddedStructs(t *testing.T) {
-	if _, err := New(Metadata{Name: "custom", Version: "1", Description: "custom"}, func(context.Context, Call[inputWithEmbeddedCustom]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "custom", Version: "1", Description: "custom"}, func(context.Context, ToolCall[inputWithEmbeddedCustom]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("embedded custom decoder error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "plain", Version: "1", Description: "plain"}, func(context.Context, Call[inputWithEmbeddedPlain]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "plain", Version: "1", Description: "plain"}, func(context.Context, ToolCall[inputWithEmbeddedPlain]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("embedded struct error = %v", err)
 	}
 }
 
 func TestNewRejectsTextUnmarshalerInput(t *testing.T) {
-	if _, err := New(Metadata{Name: "root_text", Version: "1", Description: "root text"}, func(context.Context, Call[textDecodedRootInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "root_text", Version: "1", Description: "root text"}, func(context.Context, ToolCall[textDecodedRootInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("root text decoder error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "field_text", Version: "1", Description: "field text"}, func(context.Context, Call[inputWithTextDecodedString]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "field_text", Version: "1", Description: "field text"}, func(context.Context, ToolCall[inputWithTextDecodedString]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("field text decoder error = %v", err)
 	}
 }
 
 func TestNewValidatesJSONTagNames(t *testing.T) {
-	if _, err := New(Metadata{Name: "backslash", Version: "1", Description: "backslash"}, func(context.Context, Call[invalidBackslashTagInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "backslash", Version: "1", Description: "backslash"}, func(context.Context, ToolCall[invalidBackslashTagInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("backslash tag error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "control", Version: "1", Description: "control"}, func(context.Context, Call[invalidControlTagInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "control", Version: "1", Description: "control"}, func(context.Context, ToolCall[invalidControlTagInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("control tag error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "punctuation", Version: "1", Description: "punctuation"}, func(context.Context, Call[validPunctuationTagInput]) (struct{}, error) { return struct{}{}, nil }); err != nil {
+	if _, err := NewTool(ToolMetadata{Name: "punctuation", Version: "1", Description: "punctuation"}, func(context.Context, ToolCall[validPunctuationTagInput]) (struct{}, error) { return struct{}{}, nil }); err != nil {
 		t.Fatalf("valid punctuation tag: %v", err)
 	}
 }
 
 func TestNewRejectsCloudIncompatibleInputFields(t *testing.T) {
-	if _, err := New(Metadata{Name: "incompatible", Version: "1", Description: "incompatible"}, func(context.Context, Call[cloudIncompatibleInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "incompatible", Version: "1", Description: "incompatible"}, func(context.Context, ToolCall[cloudIncompatibleInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("incompatible fields error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "compatible", Version: "1", Description: "compatible"}, func(context.Context, Call[cloudCompatibleInput]) (struct{}, error) { return struct{}{}, nil }); err != nil {
+	if _, err := NewTool(ToolMetadata{Name: "compatible", Version: "1", Description: "compatible"}, func(context.Context, ToolCall[cloudCompatibleInput]) (struct{}, error) { return struct{}{}, nil }); err != nil {
 		t.Fatalf("compatible fields: %v", err)
 	}
 }
 
 func TestNewAcceptsPrimitiveSchemaMetadata(t *testing.T) {
-	_, err := New(Metadata{Name: "metadata", Version: "1", Description: "metadata"}, func(context.Context, Call[primitiveMetadataInput]) (struct{}, error) { return struct{}{}, nil })
+	_, err := NewTool(ToolMetadata{Name: "metadata", Version: "1", Description: "metadata"}, func(context.Context, ToolCall[primitiveMetadataInput]) (struct{}, error) { return struct{}{}, nil })
 	if err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
@@ -293,110 +293,110 @@ func TestNewRejectsUnsupportedGeneratedSchemaKeywords(t *testing.T) {
 		new  func() error
 	}{
 		{name: "pattern", new: func() error {
-			_, err := New(Metadata{Name: "pattern", Version: "1", Description: "pattern"}, func(context.Context, Call[patternInput]) (struct{}, error) { return struct{}{}, nil })
+			_, err := NewTool(ToolMetadata{Name: "pattern", Version: "1", Description: "pattern"}, func(context.Context, ToolCall[patternInput]) (struct{}, error) { return struct{}{}, nil })
 			return err
 		}},
 		{name: "enum", new: func() error {
-			_, err := New(Metadata{Name: "enum", Version: "1", Description: "enum"}, func(context.Context, Call[enumInput]) (struct{}, error) { return struct{}{}, nil })
+			_, err := NewTool(ToolMetadata{Name: "enum", Version: "1", Description: "enum"}, func(context.Context, ToolCall[enumInput]) (struct{}, error) { return struct{}{}, nil })
 			return err
 		}},
 		{name: "length", new: func() error {
-			_, err := New(Metadata{Name: "length", Version: "1", Description: "length"}, func(context.Context, Call[lengthInput]) (struct{}, error) { return struct{}{}, nil })
+			_, err := NewTool(ToolMetadata{Name: "length", Version: "1", Description: "length"}, func(context.Context, ToolCall[lengthInput]) (struct{}, error) { return struct{}{}, nil })
 			return err
 		}},
 		{name: "range", new: func() error {
-			_, err := New(Metadata{Name: "range", Version: "1", Description: "range"}, func(context.Context, Call[rangeInput]) (struct{}, error) { return struct{}{}, nil })
+			_, err := NewTool(ToolMetadata{Name: "range", Version: "1", Description: "range"}, func(context.Context, ToolCall[rangeInput]) (struct{}, error) { return struct{}{}, nil })
 			return err
 		}},
 		{name: "root oneOf", new: func() error {
-			_, err := New(Metadata{Name: "root_oneof", Version: "1", Description: "root oneof"}, func(context.Context, Call[rootOneOfInput]) (struct{}, error) { return struct{}{}, nil })
+			_, err := NewTool(ToolMetadata{Name: "root_oneof", Version: "1", Description: "root oneof"}, func(context.Context, ToolCall[rootOneOfInput]) (struct{}, error) { return struct{}{}, nil })
 			return err
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := test.new(); !errors.Is(err, ErrInvalidInput) {
-				t.Fatalf("error = %v, want errors.Is(_, ErrInvalidInput)", err)
+			if err := test.new(); !errors.Is(err, ErrInvalidToolInput) {
+				t.Fatalf("error = %v, want errors.Is(_, ErrInvalidToolInput)", err)
 			}
 		})
 	}
 }
 
 func TestNewRejectsUnnamedRootInput(t *testing.T) {
-	_, err := New(Metadata{Name: "unnamed", Version: "1", Description: "unnamed"}, func(context.Context, Call[struct {
+	_, err := NewTool(ToolMetadata{Name: "unnamed", Version: "1", Description: "unnamed"}, func(context.Context, ToolCall[struct {
 		Value string `json:"value"`
 	}]) (struct{}, error) {
 		return struct{}{}, nil
 	})
-	if !errors.Is(err, ErrInvalidInput) {
+	if !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 func TestNewRejectsDuplicateEffectiveJSONPropertyNames(t *testing.T) {
-	if _, err := New(Metadata{Name: "duplicate", Version: "1", Description: "duplicate"}, func(context.Context, Call[duplicateJSONNameInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "duplicate", Version: "1", Description: "duplicate"}, func(context.Context, ToolCall[duplicateJSONNameInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("same-type duplicate error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "duplicate_types", Version: "1", Description: "duplicate types"}, func(context.Context, Call[duplicateJSONNameDifferentTypesInput]) (struct{}, error) {
+	if _, err := NewTool(ToolMetadata{Name: "duplicate_types", Version: "1", Description: "duplicate types"}, func(context.Context, ToolCall[duplicateJSONNameDifferentTypesInput]) (struct{}, error) {
 		return struct{}{}, nil
-	}); !errors.Is(err, ErrInvalidInput) {
+	}); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("different-type duplicate error = %v", err)
 	}
-	if _, err := New(Metadata{Name: "unique", Version: "1", Description: "unique"}, func(context.Context, Call[uniqueJSONNameInput]) (struct{}, error) { return struct{}{}, nil }); err != nil {
+	if _, err := NewTool(ToolMetadata{Name: "unique", Version: "1", Description: "unique"}, func(context.Context, ToolCall[uniqueJSONNameInput]) (struct{}, error) { return struct{}{}, nil }); err != nil {
 		t.Fatalf("unique fields: %v", err)
 	}
-	if _, err := New(Metadata{Name: "case_fold", Version: "1", Description: "case fold"}, func(context.Context, Call[caseFoldJSONNameInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTool(ToolMetadata{Name: "case_fold", Version: "1", Description: "case fold"}, func(context.Context, ToolCall[caseFoldJSONNameInput]) (struct{}, error) { return struct{}{}, nil }); !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("case-fold duplicate error = %v", err)
 	}
 }
 
 func TestNewRejectsUnexportedAnonymousPointerField(t *testing.T) {
-	_, err := New(Metadata{Name: "embedded_pointer", Version: "1", Description: "embedded pointer"}, func(context.Context, Call[inputWithEmbeddedPointer]) (struct{}, error) { return struct{}{}, nil })
-	if !errors.Is(err, ErrInvalidInput) {
+	_, err := NewTool(ToolMetadata{Name: "embedded_pointer", Version: "1", Description: "embedded pointer"}, func(context.Context, ToolCall[inputWithEmbeddedPointer]) (struct{}, error) { return struct{}{}, nil })
+	if !errors.Is(err, ErrInvalidToolInput) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 func TestNewValidatesToolNameRoutingIdentity(t *testing.T) {
 	for _, name := range []string{"Az_09", strings.Repeat("a", 128)} {
-		if _, err := New(Metadata{Name: name, Version: "version with spaces", Description: "valid"}, lookupOrderHandler); err != nil {
+		if _, err := NewTool(ToolMetadata{Name: name, Version: "version with spaces", Description: "valid"}, lookupOrderHandler); err != nil {
 			t.Fatalf("valid name length %d: %v", len(name), err)
 		}
 	}
 	for _, name := range []string{"has space", "has.dot", "has-hyphen", "_leading", "trailing_", "double__underscore", "café", strings.Repeat("a", 129)} {
-		_, err := New(Metadata{Name: name, Version: "1", Description: "invalid"}, lookupOrderHandler)
-		if !errors.Is(err, ErrInvalidMetadata) {
+		_, err := NewTool(ToolMetadata{Name: name, Version: "1", Description: "invalid"}, lookupOrderHandler)
+		if !errors.Is(err, ErrInvalidToolMetadata) {
 			t.Fatalf("name %q error = %v", name, err)
 		}
 	}
 }
 
 func TestNewValidatesToolVersionLength(t *testing.T) {
-	if _, err := New(Metadata{Name: "name", Version: strings.Repeat("é", 128), Description: strings.Repeat("界", 4096)}, lookupOrderHandler); err != nil {
+	if _, err := NewTool(ToolMetadata{Name: "name", Version: strings.Repeat("é", 128), Description: strings.Repeat("界", 4096)}, lookupOrderHandler); err != nil {
 		t.Fatalf("128-character version: %v", err)
 	}
-	if _, err := New(Metadata{Name: "name", Version: strings.Repeat("😀", 64), Description: strings.Repeat("😀", 2048)}, lookupOrderHandler); err != nil {
+	if _, err := NewTool(ToolMetadata{Name: "name", Version: strings.Repeat("😀", 64), Description: strings.Repeat("😀", 2048)}, lookupOrderHandler); err != nil {
 		t.Fatalf("UTF-16 boundary: %v", err)
 	}
-	_, err := New(Metadata{Name: "name", Version: strings.Repeat("é", 129), Description: "invalid"}, lookupOrderHandler)
-	if !errors.Is(err, ErrInvalidMetadata) {
+	_, err := NewTool(ToolMetadata{Name: "name", Version: strings.Repeat("é", 129), Description: "invalid"}, lookupOrderHandler)
+	if !errors.Is(err, ErrInvalidToolMetadata) {
 		t.Fatalf("129-character version error = %v", err)
 	}
-	_, err = New(Metadata{Name: "name", Version: "1", Description: strings.Repeat("界", 4097)}, lookupOrderHandler)
-	if !errors.Is(err, ErrInvalidMetadata) {
+	_, err = NewTool(ToolMetadata{Name: "name", Version: "1", Description: strings.Repeat("界", 4097)}, lookupOrderHandler)
+	if !errors.Is(err, ErrInvalidToolMetadata) {
 		t.Fatalf("4097-character description error = %v", err)
 	}
-	for _, metadata := range []Metadata{
+	for _, metadata := range []ToolMetadata{
 		{Name: "name", Version: strings.Repeat("😀", 128), Description: "invalid"},
 		{Name: "name", Version: "1", Description: strings.Repeat("😀", 2049)},
 	} {
-		if _, err := New(metadata, lookupOrderHandler); !errors.Is(err, ErrInvalidMetadata) {
+		if _, err := NewTool(metadata, lookupOrderHandler); !errors.Is(err, ErrInvalidToolMetadata) {
 			t.Fatalf("astral boundary error = %v", err)
 		}
 	}
 }
 
 func TestDefinitionSchemaIsJSON(t *testing.T) {
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, lookupOrderHandler)
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, lookupOrderHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,8 +406,8 @@ func TestDefinitionSchemaIsJSON(t *testing.T) {
 }
 
 func TestExecuteDecodesTypedInputAndSerializesOutput(t *testing.T) {
-	var received Call[lookupOrderInput]
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(_ context.Context, call Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	var received ToolCall[lookupOrderInput]
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(_ context.Context, call ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		received = call
 		return lookupOrderOutput{Status: "paid"}, nil
 	})
@@ -415,7 +415,7 @@ func TestExecuteDecodesTypedInputAndSerializesOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{UserID: "user_1"})
+	output, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{UserID: "user_1"})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -427,10 +427,10 @@ func TestExecuteDecodesTypedInputAndSerializesOutput(t *testing.T) {
 	}
 }
 
-func TestExecuteWithContextCopiesSessionLabels(t *testing.T) {
+func TestExecuteWithTrustedContextCopiesSessionLabels(t *testing.T) {
 	labels := map[string]string{"client_id": "client_1"}
-	var first, second Call[lookupOrderInput]
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(_ context.Context, call Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	var first, second ToolCall[lookupOrderInput]
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(_ context.Context, call ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		if first.Context.SessionLabels == nil {
 			first = call
 		} else {
@@ -441,13 +441,13 @@ func TestExecuteWithContextCopiesSessionLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callContext := CallContext{SessionLabels: labels}
-	_, err = serverTool.ExecuteWithContext(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{UserID: "user"}, callContext)
+	callContext := ToolCallContext{SessionLabels: labels}
+	_, err = serverTool.ExecuteWithTrustedContext(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{UserID: "user"}, callContext)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first.Context.SessionLabels["client_id"] = "mutated handler"
-	_, err = serverTool.ExecuteWithContext(context.Background(), json.RawMessage(`{"orderId":"ord_2"}`), Subject{UserID: "user"}, callContext)
+	_, err = serverTool.ExecuteWithTrustedContext(context.Background(), json.RawMessage(`{"orderId":"ord_2"}`), ToolSubject{UserID: "user"}, callContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,12 +455,12 @@ func TestExecuteWithContextCopiesSessionLabels(t *testing.T) {
 		t.Fatalf("second labels = %#v", second.Context.SessionLabels)
 	}
 
-	var direct Call[lookupOrderInput]
-	directTool, _ := New(Metadata{Name: "direct", Version: "1", Description: "Direct"}, func(_ context.Context, call Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	var direct ToolCall[lookupOrderInput]
+	directTool, _ := NewTool(ToolMetadata{Name: "direct", Version: "1", Description: "Direct"}, func(_ context.Context, call ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		direct = call
 		return lookupOrderOutput{}, nil
 	})
-	_, _ = directTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{})
+	_, _ = directTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{})
 	if len(direct.Context.SessionLabels) != 0 {
 		t.Fatalf("direct context = %#v", direct.Context)
 	}
@@ -468,7 +468,7 @@ func TestExecuteWithContextCopiesSessionLabels(t *testing.T) {
 
 func TestExecuteRejectsUnknownInputField(t *testing.T) {
 	called := false
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		called = true
 		return lookupOrderOutput{}, nil
 	})
@@ -476,7 +476,7 @@ func TestExecuteRejectsUnknownInputField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1","unknown":true}`), Subject{})
+	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1","unknown":true}`), ToolSubject{})
 	if err == nil || called {
 		t.Fatalf("err = %v, called = %v", err, called)
 	}
@@ -484,7 +484,7 @@ func TestExecuteRejectsUnknownInputField(t *testing.T) {
 
 func TestExecuteRequiresExactUniqueInputKeys(t *testing.T) {
 	called := false
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		called = true
 		return lookupOrderOutput{}, nil
 	})
@@ -496,18 +496,18 @@ func TestExecuteRequiresExactUniqueInputKeys(t *testing.T) {
 		json.RawMessage(`{"orderId":"ord_1","orderId":"ord_2"}`),
 	} {
 		called = false
-		if _, err := serverTool.Execute(context.Background(), input, Subject{}); err == nil || called {
+		if _, err := serverTool.Execute(context.Background(), input, ToolSubject{}); err == nil || called {
 			t.Fatalf("input=%s err=%v called=%v", input, err, called)
 		}
 	}
-	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{}); err != nil || !called {
+	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{}); err != nil || !called {
 		t.Fatalf("exact key err=%v called=%v", err, called)
 	}
 }
 
 func TestExecuteRejectsNullScalarInput(t *testing.T) {
 	called := false
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		called = true
 		return lookupOrderOutput{}, nil
 	})
@@ -515,14 +515,14 @@ func TestExecuteRejectsNullScalarInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":null}`), Subject{}); err == nil || called {
+	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":null}`), ToolSubject{}); err == nil || called {
 		t.Fatalf("err=%v called=%v", err, called)
 	}
 }
 
 func TestExecuteRejectsTrailingJSON(t *testing.T) {
 	called := false
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		called = true
 		return lookupOrderOutput{}, nil
 	})
@@ -530,7 +530,7 @@ func TestExecuteRejectsTrailingJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"} {"orderId":"ord_2"}`), Subject{})
+	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"} {"orderId":"ord_2"}`), ToolSubject{})
 	if err == nil || called {
 		t.Fatalf("err = %v, called = %v", err, called)
 	}
@@ -538,7 +538,7 @@ func TestExecuteRejectsTrailingJSON(t *testing.T) {
 
 func TestExecuteRejectsNullInput(t *testing.T) {
 	called := false
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		called = true
 		return lookupOrderOutput{}, nil
 	})
@@ -546,47 +546,47 @@ func TestExecuteRejectsNullInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`null`), Subject{}); err == nil || called {
+	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`null`), ToolSubject{}); err == nil || called {
 		t.Fatalf("err = %v, called = %v", err, called)
 	}
 }
 
 func TestExecuteAllowsNullOutput(t *testing.T) {
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (*lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (*lookupOrderOutput, error) {
 		return nil, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	output, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{})
+	output, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{})
 	if err != nil || string(output) != "null" {
 		t.Fatalf("output = %s, err = %v", output, err)
 	}
 }
 
 func TestExecuteRejectsNonJSONOutput(t *testing.T) {
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (chan int, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (chan int, error) {
 		return make(chan int), nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{}); err == nil {
+	if _, err := serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{}); err == nil {
 		t.Fatal("expected output serialization error")
 	}
 }
 
 func TestExecuteRecoversPanicWithDiagnostics(t *testing.T) {
-	serverTool, err := New(Metadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, Call[lookupOrderInput]) (lookupOrderOutput, error) {
+	serverTool, err := NewTool(ToolMetadata{Name: "lookup_order", Version: "1", Description: "Look up order"}, func(context.Context, ToolCall[lookupOrderInput]) (lookupOrderOutput, error) {
 		panic("database exploded")
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), Subject{})
+	_, err = serverTool.Execute(context.Background(), json.RawMessage(`{"orderId":"ord_1"}`), ToolSubject{})
 	if err == nil || !strings.Contains(err.Error(), "database exploded") || !strings.Contains(err.Error(), "goroutine") {
 		t.Fatalf("panic diagnostics = %v", err)
 	}
@@ -594,10 +594,10 @@ func TestExecuteRecoversPanicWithDiagnostics(t *testing.T) {
 
 func TestNewErrorNormalizesAndCopiesDetails(t *testing.T) {
 	details := map[string]any{"field": "orderId"}
-	publicErr := NewError("", "", details)
+	publicErr := NewToolError("", "", details)
 	details["field"] = "changed"
 
-	if publicErr.Code() != UnknownErrorCode || publicErr.Message() != UnknownErrorMessage || publicErr.Error() != UnknownErrorMessage {
+	if publicErr.Code() != unknownToolErrorCode || publicErr.Message() != unknownToolErrorMessage || publicErr.Error() != unknownToolErrorMessage {
 		t.Fatalf("unexpected public error: code=%q message=%q error=%q", publicErr.Code(), publicErr.Message(), publicErr.Error())
 	}
 	got := publicErr.Details()
@@ -612,7 +612,7 @@ func TestNewErrorNormalizesAndCopiesDetails(t *testing.T) {
 
 func TestNewErrorDeepCopiesJSONDetails(t *testing.T) {
 	nested := map[string]any{"map": map[string]any{"number": json.Number("18446744073709551615")}, "slice": []any{map[string]any{"value": "original"}}}
-	publicErr := NewError("safe", "safe", nested)
+	publicErr := NewToolError("safe", "safe", nested)
 	nested["map"].(map[string]any)["number"] = json.Number("1")
 	nested["slice"].([]any)[0].(map[string]any)["value"] = "changed"
 
@@ -627,34 +627,34 @@ func TestNewErrorDeepCopiesJSONDetails(t *testing.T) {
 }
 
 func TestNewErrorDropsNonJSONDetails(t *testing.T) {
-	publicErr := NewError("safe", "safe", map[string]any{"bad": make(chan int)})
-	if publicErr.Code() != UnknownErrorCode || publicErr.Message() != UnknownErrorMessage || publicErr.Details() != nil {
+	publicErr := NewToolError("safe", "safe", map[string]any{"bad": make(chan int)})
+	if publicErr.Code() != unknownToolErrorCode || publicErr.Message() != unknownToolErrorMessage || publicErr.Details() != nil {
 		t.Fatalf("error = %q/%q details=%#v", publicErr.Code(), publicErr.Message(), publicErr.Details())
 	}
 }
 
 func TestNewErrorNormalizesPanickingJSONDetails(t *testing.T) {
-	publicErr := NewError("safe", "safe", map[string]any{"bad": panickingMarshaler{}})
-	if publicErr.Code() != UnknownErrorCode || publicErr.Message() != UnknownErrorMessage || publicErr.Details() != nil {
+	publicErr := NewToolError("safe", "safe", map[string]any{"bad": panickingMarshaler{}})
+	if publicErr.Code() != unknownToolErrorCode || publicErr.Message() != unknownToolErrorMessage || publicErr.Details() != nil {
 		t.Fatalf("error = %q/%q details=%#v", publicErr.Code(), publicErr.Message(), publicErr.Details())
 	}
 }
 
 func TestErrorSupportsStandardWrapping(t *testing.T) {
-	publicErr := NewError("order.not_found", "Order not found", nil)
+	publicErr := NewToolError("order.not_found", "Order not found", nil)
 	wrapped := fmt.Errorf("lookup failed: %w", publicErr)
-	var target *Error
+	var target *ToolError
 	if !errors.As(wrapped, &target) || target != publicErr {
 		t.Fatalf("errors.As target = %#v", target)
 	}
 }
 
 func TestNewNamespaceValidatesAndCopiesTools(t *testing.T) {
-	searchV1, err := New(Metadata{Name: "search", Version: "1", Description: "Search v1"}, lookupOrderHandler)
+	searchV1, err := NewTool(ToolMetadata{Name: "search", Version: "1", Description: "Search v1"}, lookupOrderHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
-	searchV2, err := New(Metadata{Name: "search", Version: "2", Description: "Search v2"}, lookupOrderHandler)
+	searchV2, err := NewTool(ToolMetadata{Name: "search", Version: "2", Description: "Search v2"}, lookupOrderHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,32 +665,32 @@ func TestNewNamespaceValidatesAndCopiesTools(t *testing.T) {
 		tools []Tool
 		want  error
 	}{
-		{name: "empty name", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "empty tools", ns: "crm", want: ErrInvalidNamespace},
-		{name: "space", ns: "sales ops", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "dot", ns: "sales.ops", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "hyphen", ns: "sales-ops", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "leading underscore", ns: "_sales", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "trailing underscore", ns: "sales_", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "double underscore", ns: "sales__ops", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "non ascii", ns: "café", tools: []Tool{searchV1}, want: ErrInvalidNamespace},
-		{name: "too long", ns: strings.Repeat("n", 257), tools: []Tool{searchV1}, want: ErrInvalidNamespace},
+		{name: "empty name", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "empty tools", ns: "crm", want: ErrInvalidToolNamespace},
+		{name: "space", ns: "sales ops", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "dot", ns: "sales.ops", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "hyphen", ns: "sales-ops", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "leading underscore", ns: "_sales", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "trailing underscore", ns: "sales_", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "double underscore", ns: "sales__ops", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "non ascii", ns: "café", tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
+		{name: "too long", ns: strings.Repeat("n", 257), tools: []Tool{searchV1}, want: ErrInvalidToolNamespace},
 		{name: "duplicate identity", ns: "crm", tools: []Tool{searchV1, searchV1}, want: ErrDuplicateTool},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewNamespace(tt.ns, tt.tools...)
+			_, err := NewToolNamespace(tt.ns, tt.tools...)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want errors.Is(_, %v)", err, tt.want)
 			}
 		})
 	}
 	for _, name := range []string{"Az_09", strings.Repeat("n", 256)} {
-		if _, err := NewNamespace(name, searchV1); err != nil {
+		if _, err := NewToolNamespace(name, searchV1); err != nil {
 			t.Fatalf("valid namespace length %d: %v", len(name), err)
 		}
 	}
 
-	namespace, err := NewNamespace("crm", searchV1, searchV2)
+	namespace, err := NewToolNamespace("crm", searchV1, searchV2)
 	if err != nil {
 		t.Fatalf("multiple versions: %v", err)
 	}
