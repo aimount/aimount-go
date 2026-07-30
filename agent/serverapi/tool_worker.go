@@ -104,7 +104,7 @@ func (w *ToolWorker) Run(ctx context.Context) error {
 			claimKey = idempotencyKey("claim", nonce, executorToken, fmt.Sprint(attempt))
 			claimToken = executorToken
 		}
-		claim, claimErr := w.client.claim(runCtx, executorToken, w.namespaces, claimKey)
+		claim, claimErr := w.client.claim(runCtx, executorToken, nil, claimKey)
 		if w.afterClaim != nil {
 			w.afterClaim()
 		}

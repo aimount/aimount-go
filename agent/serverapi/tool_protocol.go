@@ -1,10 +1,12 @@
 package serverapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -142,7 +144,10 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 		ClaimExpiresAt json.RawMessage `json:"claimExpiresAt"`
 		ToolCall       claimedCall     `json:"toolCall"`
 	}
-	body := map[string]any{"executorToken": executorToken, "namespaces": namespaces}
+	body := map[string]any{"executorToken": executorToken}
+	if namespaces != nil {
+		body["namespaces"] = namespaces
+	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/server/tools/claim", escape(c.agentID)), body, &wire, key); err != nil {
 		return claimAck{}, err
 	}
@@ -167,9 +172,35 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 }
 
 func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome outcome, key string) error {
-	var ack submitOutcomeAck
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/agent/v1/agents/%s/server/tools/outcome", escape(c.agentID)), submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome}, &ack, key); err != nil {
+	path := fmt.Sprintf("/agent/v1/agents/%s/server/tools/outcome", escape(c.agentID))
+	body, err := json.Marshal(submitOutcomeRequest{OutcomeToken: outcomeToken, Outcome: outcome})
+	if err != nil {
 		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("authorization", "Bearer "+c.token)
+	if key != "" {
+		req.Header.Set("idempotency-key", key)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return Error{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Code: httpjson.ErrorCode(responseBody)}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return protocolError{fmt.Sprintf("serverapi: malformed outcome response: unexpected status %d", resp.StatusCode)}
+	}
+	var ack submitOutcomeAck
+	if err := httpjson.Decode(resp.Body, &ack); err != nil {
+		return protocolError{fmt.Sprintf("serverapi: malformed outcome response: %v", err)}
 	}
 	if ack.Recorded == nil {
 		return protocolError{"serverapi: malformed outcome response: recorded must be boolean"}
