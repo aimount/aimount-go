@@ -1,25 +1,27 @@
 # aimount-go
 
-Go SDK packages for Aimount.
+Go SDK for Aimount Agent integrations.
 
 ## Packages
 
-- `tool`: typed executable server tools and namespaces.
-- `toolworker`: Agent API namespace publication and execution workers.
-- `agent`: Server API client for issuing Agent User access tokens from a Go backend.
+- `agent`: shared Agent entities and typed executable tools.
+- `agent/serverapi`: trusted-backend Agent Server API client, manifest publication, and tool workers.
 
-## Agent Quickstart
+The SDK does not publish empty Client API or Console API packages. Those packages will be added when they expose real operations.
 
-`agent` lets a trusted Go backend request a short-lived Agent User access token for an end user of the client product.
+## Server API Client
 
 ```go
-issuer := agent.New(agent.Config{
-	BaseURL:      "https://api.aimount.dev",
-	AgentID:      "agent_123",
+client, err := serverapi.New(serverapi.Config{
+	BaseURL:     "https://api.aimount.dev",
+	AgentID:     "agent_123",
 	AgentAPIKey: "...",
 })
+if err != nil {
+	panic(err)
+}
 
-token, err := issuer.IssueUserAccessToken(context.Background(), agent.IssueUserAccessTokenRequest{
+token, err := client.IssueClientAPIAccessToken(context.Background(), serverapi.IssueClientAPIAccessTokenParams{
 	ProfileID: "profile_123",
 	UserID:    "user_from_client_product",
 })
@@ -32,15 +34,9 @@ _ = token.AccessToken
 
 `AgentAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user clients; send only the issued Agent User access token payload to those clients.
 
-To migrate, replace `github.com/aimount/aimount-go/serviceauth` or `github.com/aimount/aimount-go/runtimeauth` imports with `github.com/aimount/aimount-go/agent`. `serviceauth` symbols keep the same names under `agent`; `runtimeauth.UserToken.RuntimeToken` becomes `agent.UserAccessToken.AccessToken`. The removed packages have no compatibility facades.
+## Server Tools
 
-## Toolworker Quickstart
-
-`tool` binds generated input schemas to typed handlers. `toolworker` registers live executor availability, claims calls, runs handlers, and submits outcomes.
-
-Tool inputs intentionally match Cloud's current flat schema subset: use a named struct with unique, named `string`, `bool`, `float32`, or `float64` JSON fields. `tool.New` rejects integers, nested or anonymous structs, pointers, collections, maps, interfaces, custom JSON, text, or schema hooks, invalid JSON tag names, case-fold-equivalent field names, and `json:",string"` fields. Execution requires exact case-sensitive property names and rejects duplicate keys.
-
-Schema tags may mark a field `required` and add `description` metadata. Other validation metadata is rejected because Cloud does not enforce it. Direct `Tool.Execute` enforces object shape, exact keys, duplicate-key rejection, and Go primitive decoding; Cloud enforces published required fields before worker claims, while handlers validate decoded domain values.
+`agent.NewTool` derives an input schema from a named Go struct and binds it to a typed handler. `serverapi.ToolWorker` registers live executor availability, claims calls, runs handlers, and submits outcomes.
 
 ```go
 type LookupOrderInput struct {
@@ -52,14 +48,11 @@ type LookupOrderOutput struct {
 	UserID string `json:"userId"`
 }
 
-lookupOrder, err := tool.New(tool.Metadata{
+lookupOrder, err := agent.NewTool(agent.ToolMetadata{
 	Name: "lookup_order", Version: "1", Description: "Look up an order by id.",
-}, func(ctx context.Context, call tool.Call[LookupOrderInput]) (LookupOrderOutput, error) {
+}, func(ctx context.Context, call agent.ToolCall[LookupOrderInput]) (LookupOrderOutput, error) {
 	if call.Input.OrderID == "" {
-		return LookupOrderOutput{}, tool.NewError("order.id_required", "order id is required", nil)
-	}
-	if call.Context.SessionLabels["client_id"] == "" {
-		return LookupOrderOutput{}, tool.NewError("client.required", "trusted client context is required", nil)
+		return LookupOrderOutput{}, agent.NewToolError("order.id_required", "order id is required", nil)
 	}
 	return LookupOrderOutput{Status: "paid", UserID: call.Subject.UserID}, nil
 })
@@ -67,15 +60,19 @@ if err != nil {
 	panic(err)
 }
 
-crm, err := tool.NewNamespace("crm", lookupOrder)
+crm, err := agent.NewToolNamespace("crm", lookupOrder)
 if err != nil {
 	panic(err)
 }
 
-worker, err := toolworker.New(toolworker.WorkerConfig{
-	Client: toolworker.ClientConfig{
-		BaseURL: "https://api.aimount.dev", AgentID: "agent_123", AgentAPIKey: "...",
-	},
+client, err := serverapi.New(serverapi.Config{
+	BaseURL: "https://api.aimount.dev", AgentID: "agent_123", AgentAPIKey: "...",
+})
+if err != nil {
+	panic(err)
+}
+
+worker, err := serverapi.NewToolWorker(client, serverapi.ToolWorkerOptions{
 	MaxConcurrentCalls: 4,
 }, crm)
 if err != nil {
@@ -88,38 +85,36 @@ if err := worker.Run(ctx); err != nil {
 }
 ```
 
-## Production Manifest Flow
-
-Production deployments should keep desired catalog state separate from live worker availability.
-
-```text
-cmd/publish-tools
-  -> publishes namespaces during CI/CD or deploy
-  -> Agent API key scope: agent:tool:manifest
-  -> exits
-
-cmd/tool-worker
-  -> registers executor availability
-  -> heartbeats, claims, executes, submits outcomes
-  -> Agent API key scopes: agent:tool:executor, agent:tool:claim, agent:tool:outcome
-```
-
-The publisher and workers reuse the same executable namespace values. Publish one namespace per call:
+Production deployments should publish desired manifests separately from worker availability:
 
 ```go
-publisher, err := toolworker.NewPublisher(toolworker.ClientConfig{
-	BaseURL: "https://api.aimount.dev", AgentID: "agent_123", AgentAPIKey: "...",
-})
-if err != nil {
-	panic(err)
-}
-_, err = publisher.Publish(ctx, crm, toolworker.PublishOptions{})
+published, err := client.PublishToolManifest(ctx, crm, serverapi.PublishToolManifestOptions{})
 ```
 
-Pass multiple namespaces to the same `toolworker.New` call, for example `toolworker.New(config, crm, billing)`. `MaxConcurrentCalls` remains one global limit across all namespaces.
+`ToolWorker.Run` owns executor registration, heartbeat, claim, and outcome protocol operations. It is one-shot: cancel its context during shutdown to stop new claims and cancel active handler contexts.
 
-`Worker.Run` is one-shot. Cancel its context during shutdown to stop new claims and cancel active handler contexts. Handlers must observe context cancellation and finish promptly. Go cannot forcibly terminate an uncooperative handler goroutine: after its claim deadline the worker warns and may stop waiting during shutdown, but the goroutine continues and keeps its `MaxConcurrentCalls` slot until it exits.
+Handlers must observe context cancellation and finish promptly. Go cannot forcibly terminate a handler goroutine that ignores its context; after its claim deadline the worker may return while that goroutine continues until the handler exits. Outcome delivery already in progress may delay graceful shutdown until its bounded delivery context ends.
 
-## Boundaries
+## Migration From v0.2
 
-`toolworker` does not provide Agent session APIs, Console APIs, client/browser tool execution, per-call heartbeat, or operator/debug reads. Handlers should finish before their call deadline because the Agent API does not expose per-call heartbeat.
+| Previous | Current |
+| --- | --- |
+| `agent.Config`, `agent.Client`, `agent.New` | `serverapi.Config`, `serverapi.Client`, `serverapi.New` |
+| `agent.IssueUserAccessTokenRequest` | `serverapi.IssueClientAPIAccessTokenParams` |
+| `Client.IssueUserAccessToken` | `Client.IssueClientAPIAccessToken` |
+| `agent.UserAccessToken` | `agent.AgentUserAccessToken` |
+| `agent.APIError`, `agent.IsRetryable` | `serverapi.Error`, `serverapi.IsRetryable` |
+| `tool.Metadata`, `tool.New` | `agent.ToolMetadata`, `agent.NewTool` |
+| `tool.Definition`, `tool.Tool` | `agent.ToolDefinition`, `agent.Tool` |
+| `tool.Subject`, `tool.CallContext` | `agent.ToolSubject`, `agent.ToolCallContext` |
+| `tool.Call`, `tool.Handler` | `agent.ToolCall`, `agent.ToolHandler` |
+| `tool.Namespace`, `tool.NewNamespace` | `agent.ToolNamespace`, `agent.NewToolNamespace` |
+| `tool.Error`, `tool.NewError` | `agent.ToolError`, `agent.NewToolError` |
+| `tool.ErrInvalidMetadata`, `tool.ErrInvalidInput`, `tool.ErrInvalidNamespace` | `agent.ErrInvalidToolMetadata`, `agent.ErrInvalidToolInput`, `agent.ErrInvalidToolNamespace` |
+| `toolworker.ClientConfig` | `serverapi.Config` |
+| `toolworker.WorkerConfig`, `toolworker.New` | `serverapi.ToolWorkerOptions`, `serverapi.NewToolWorker` |
+| `toolworker.NewPublisher`, `Publisher.Publish` | `serverapi.New`, `Client.PublishToolManifest` |
+| `toolworker.PublishOptions`, `toolworker.PublishManifestAck` | `serverapi.PublishToolManifestOptions`, `serverapi.PublishedToolManifest` |
+| `toolworker.APIError`, `toolworker.IsRetryable` | `serverapi.Error`, `serverapi.IsRetryable` |
+
+This is a breaking pre-v1 redesign. The removed top-level `tool` and `toolworker` packages have no compatibility facades.

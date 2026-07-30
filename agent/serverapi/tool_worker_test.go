@@ -1,4 +1,4 @@
-package toolworker
+package serverapi
 
 import (
 	"bytes"
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aimount/aimount-go/tool"
+	"github.com/aimount/aimount-go/agent"
 )
 
 type input struct {
@@ -34,33 +35,42 @@ type nilReceiverError struct{ message string }
 
 func (e *nilReceiverError) Error() string { return e.message }
 
-func executable(t *testing.T, name, version string, handler tool.Handler[input, output]) tool.Tool {
+func executable(t *testing.T, name, version string, handler agent.ToolHandler[input, output]) agent.Tool {
 	t.Helper()
-	serverTool, err := tool.New(tool.Metadata{Name: name, Version: version, Description: name}, handler)
+	serverTool, err := agent.NewTool(agent.ToolMetadata{Name: name, Version: version, Description: name}, handler)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return serverTool
 }
 
-func namespace(t *testing.T, name string, tools ...tool.Tool) tool.Namespace {
+func namespace(t *testing.T, name string, tools ...agent.Tool) agent.ToolNamespace {
 	t.Helper()
-	ns, err := tool.NewNamespace(name, tools...)
+	ns, err := agent.NewToolNamespace(name, tools...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ns
 }
 
-func config(baseURL string) ClientConfig {
-	return ClientConfig{BaseURL: baseURL, AgentID: "agent", AgentAPIKey: "awi_tst_secret"}
+func config(baseURL string) Config {
+	return Config{BaseURL: baseURL, AgentID: "agent", AgentAPIKey: "awi_tst_secret"}
+}
+
+func mustClient(t *testing.T, config Config) *Client {
+	t.Helper()
+	client, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 func boolPointer(value bool) *bool { return &value }
 
 func TestClientConfigValidationAndDefaults(t *testing.T) {
 	valid := config("https://example.com/api/")
-	publisher, err := NewPublisher(valid)
+	publisher, err := New(valid)
 	if err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
@@ -72,25 +82,25 @@ func TestClientConfigValidationAndDefaults(t *testing.T) {
 	}
 
 	custom := &http.Client{}
-	publisher, err = NewPublisher(ClientConfig{BaseURL: "http://example.com", AgentID: "agent", AgentAPIKey: "key", HTTPClient: custom})
+	publisher, err = New(Config{BaseURL: "http://example.com", AgentID: "agent", AgentAPIKey: "key", HTTPClient: custom})
 	if err != nil || publisher.client.http != custom {
 		t.Fatalf("custom client: %v", err)
 	}
 
 	for _, tc := range []struct {
 		name   string
-		cfg    ClientConfig
+		cfg    Config
 		target error
 	}{
-		{"base URL", ClientConfig{AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
-		{"scheme", ClientConfig{BaseURL: "ftp://example.com", AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
-		{"relative", ClientConfig{BaseURL: "/api", AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
-		{"query", ClientConfig{BaseURL: "https://example.com?q=1", AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
-		{"agent", ClientConfig{BaseURL: "https://example.com", AgentAPIKey: "k"}, ErrMissingAgentID},
-		{"key", ClientConfig{BaseURL: "https://example.com", AgentID: "a"}, ErrMissingAgentAPIKey},
+		{"base URL", Config{AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
+		{"scheme", Config{BaseURL: "ftp://example.com", AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
+		{"relative", Config{BaseURL: "/api", AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
+		{"query", Config{BaseURL: "https://example.com?q=1", AgentID: "a", AgentAPIKey: "k"}, ErrInvalidBaseURL},
+		{"agent", Config{BaseURL: "https://example.com", AgentAPIKey: "k"}, ErrMissingAgentID},
+		{"key", Config{BaseURL: "https://example.com", AgentID: "a"}, ErrMissingAgentAPIKey},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewPublisher(tc.cfg)
+			_, err := New(tc.cfg)
 			if !errors.Is(err, tc.target) {
 				t.Fatalf("error = %v", err)
 			}
@@ -110,7 +120,7 @@ func TestDefaultMaintenanceStepHeartbeatsStandardRegistration(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	w, err := New(WorkerConfig{Client: config(server.URL)}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	w, err := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +129,20 @@ func TestDefaultMaintenanceStepHeartbeatsStandardRegistration(t *testing.T) {
 	w.maintainRegistration(context.Background(), &registration, &mu)
 	if registers.Load() != 0 || heartbeats.Load() != 1 {
 		t.Fatalf("registers=%d heartbeats=%d", registers.Load(), heartbeats.Load())
+	}
+}
+
+func TestMaintenanceDelayRunsBeforeRegistrationExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	got := maintenanceDelay(now, now.Add(10*time.Second), 30*time.Second, 3*time.Second)
+	if got != 7*time.Second {
+		t.Fatalf("delay = %s", got)
+	}
+	if got := maintenanceDelay(now, now.Add(time.Minute), 30*time.Second, 3*time.Second); got != 30*time.Second {
+		t.Fatalf("heartbeat delay = %s", got)
+	}
+	if got := maintenanceDelay(now, now.Add(-time.Second), 30*time.Second, 3*time.Second); got != time.Second {
+		t.Fatalf("expired retry delay = %s", got)
 	}
 }
 
@@ -131,16 +155,16 @@ func TestPublisherPublishesGeneratedNamespace(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		_ = json.NewEncoder(w).Encode(PublishManifestAck{ManifestToken: "mt", ManifestHash: "mh"})
+		_ = json.NewEncoder(w).Encode(PublishedToolManifest{ManifestToken: "mt", ManifestHash: "mh"})
 	}))
 	defer server.Close()
 
-	publisher, err := NewPublisher(config(server.URL))
+	publisher, err := New(config(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverTool := executable(t, "search", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })
-	ack, err := publisher.Publish(context.Background(), namespace(t, "crm", serverTool), PublishOptions{})
+	serverTool := executable(t, "search", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })
+	ack, err := publisher.PublishToolManifest(context.Background(), namespace(t, "crm", serverTool), PublishToolManifestOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,41 +229,49 @@ func TestPublisherRejectsMultipleVersionsAndInvalidOptions(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	defer server.Close()
-	publisher, _ := NewPublisher(config(server.URL))
-	h := func(context.Context, tool.Call[input]) (output, error) { return output{}, nil }
-	_, err := publisher.Publish(context.Background(), namespace(t, "crm", executable(t, "search", "1", h), executable(t, "search", "2", h)), PublishOptions{})
+	publisher, _ := New(config(server.URL))
+	h := func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil }
+	_, err := publisher.PublishToolManifest(context.Background(), namespace(t, "crm", executable(t, "search", "1", h), executable(t, "search", "2", h)), PublishToolManifestOptions{})
 	if !errors.Is(err, ErrMultipleToolVersions) || calls.Load() != 0 {
 		t.Fatalf("error/calls = %v/%d", err, calls.Load())
 	}
-	_, err = publisher.Publish(context.Background(), namespace(t, "crm", executable(t, "other", "1", h)), PublishOptions{IfMatchManifestToken: "mt", ConflictResolutionPolicy: ManifestConflictReplace})
+	_, err = publisher.PublishToolManifest(context.Background(), namespace(t, "crm", executable(t, "other", "1", h)), PublishToolManifestOptions{IfMatchManifestToken: "mt", ConflictResolutionPolicy: ManifestConflictReplace})
 	if err == nil || calls.Load() != 0 {
 		t.Fatalf("invalid options error/calls = %v/%d", err, calls.Load())
+	}
+	for _, options := range []PublishToolManifestOptions{
+		{ConflictResolutionPolicy: "invalid"},
+		{ConflictResolutionPolicy: ManifestConflictReplaceIfTokenMatch},
+	} {
+		if _, err := publisher.PublishToolManifest(context.Background(), namespace(t, "crm", executable(t, "other", "1", h)), options); err == nil || calls.Load() != 0 {
+			t.Fatalf("invalid policy error/calls = %v/%d", err, calls.Load())
+		}
 	}
 }
 
 func TestPublisherRejectsZeroNamespace(t *testing.T) {
-	publisher, err := NewPublisher(config("https://example.com"))
+	publisher, err := New(config("https://example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := publisher.Publish(context.Background(), tool.Namespace{}, PublishOptions{}); !errors.Is(err, ErrInvalidNamespace) {
+	if _, err := publisher.PublishToolManifest(context.Background(), agent.ToolNamespace{}, PublishToolManifestOptions{}); !errors.Is(err, ErrInvalidNamespace) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 func TestWorkerConstructor(t *testing.T) {
-	h := func(context.Context, tool.Call[input]) (output, error) { return output{}, nil }
+	h := func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil }
 	ns := namespace(t, "crm", executable(t, "search", "1", h))
-	if _, err := New(WorkerConfig{Client: config("https://example.com")}); !errors.Is(err, ErrNamespaceRequired) {
+	if _, err := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}); !errors.Is(err, ErrNamespaceRequired) {
 		t.Fatalf("missing namespace: %v", err)
 	}
-	if _, err := New(WorkerConfig{Client: config("https://example.com")}, tool.Namespace{}); !errors.Is(err, ErrInvalidNamespace) {
+	if _, err := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}, agent.ToolNamespace{}); !errors.Is(err, ErrInvalidNamespace) {
 		t.Fatalf("zero namespace: %v", err)
 	}
-	if _, err := New(WorkerConfig{Client: config("https://example.com")}, ns, ns); !errors.Is(err, ErrDuplicateNamespace) {
+	if _, err := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}, ns, ns); !errors.Is(err, ErrDuplicateNamespace) {
 		t.Fatalf("duplicate namespace: %v", err)
 	}
-	w, err := New(WorkerConfig{Client: config("https://example.com")}, ns)
+	w, err := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}, ns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +279,7 @@ func TestWorkerConstructor(t *testing.T) {
 		t.Fatalf("defaults: %+v", w.config)
 	}
 	tools := ns.Tools()
-	tools[0] = tool.Tool{}
+	tools[0] = agent.Tool{}
 	if _, ok := w.tools[identity{"crm", "search", "1"}]; !ok {
 		t.Fatal("registry changed through namespace snapshot")
 	}
@@ -261,16 +293,16 @@ func TestPublisherSendsConflictPolicies(t *testing.T) {
 			t.Error(err)
 		}
 		requests <- body
-		_ = json.NewEncoder(w).Encode(PublishManifestAck{ManifestToken: "mt", ManifestHash: "same-hash"})
+		_ = json.NewEncoder(w).Encode(PublishedToolManifest{ManifestToken: "mt", ManifestHash: "same-hash"})
 	}))
 	defer server.Close()
-	publisher, _ := NewPublisher(config(server.URL))
-	ns := namespace(t, "crm", executable(t, "search", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil }))
-	for _, options := range []PublishOptions{
+	publisher, _ := New(config(server.URL))
+	ns := namespace(t, "crm", executable(t, "search", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil }))
+	for _, options := range []PublishToolManifestOptions{
 		{IfMatchManifestToken: "expected", ConflictResolutionPolicy: ManifestConflictReplaceIfTokenMatch},
 		{ConflictResolutionPolicy: ManifestConflictReplace},
 	} {
-		ack, err := publisher.Publish(context.Background(), ns, options)
+		ack, err := publisher.PublishToolManifest(context.Background(), ns, options)
 		if err != nil || ack.ManifestHash != "same-hash" {
 			t.Fatalf("publish: ack=%+v err=%v", ack, err)
 		}
@@ -301,12 +333,12 @@ func TestShutdownStopsWaitingAtClaimDeadline(t *testing.T) {
 	defer server.Close()
 	release := make(chan struct{})
 	defer close(release)
-	h := func(context.Context, tool.Call[input]) (output, error) {
+	h := func(context.Context, agent.ToolCall[input]) (output, error) {
 		close(started)
 		<-release
 		return output{}, nil
 	}
-	w, _ := New(WorkerConfig{Client: config(server.URL), Logger: slog.New(slog.NewTextHandler(&logs, nil)), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "stuck", "1", h)))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{Logger: slog.New(slog.NewTextHandler(&logs, nil)), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "stuck", "1", h)))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -359,12 +391,12 @@ func TestWorkerUsesAllNamespacesAndRoutesFullIdentity(t *testing.T) {
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	h1 := func(context.Context, tool.Call[input]) (output, error) { return output{Value: "crm"}, nil }
-	h2 := func(context.Context, tool.Call[input]) (output, error) {
+	h1 := func(context.Context, agent.ToolCall[input]) (output, error) { return output{Value: "crm"}, nil }
+	h2 := func(context.Context, agent.ToolCall[input]) (output, error) {
 		cancel()
 		return output{Value: "billing"}, nil
 	}
-	w, _ := New(WorkerConfig{Client: config(server.URL), MaxConcurrentCalls: 1, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "same", "1", h1)), namespace(t, "billing", executable(t, "same", "2", h2)))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{MaxConcurrentCalls: 1, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "same", "1", h1)), namespace(t, "billing", executable(t, "same", "2", h2)))
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +429,7 @@ func TestWorkerUsesTrustedClaimLabelsInsteadOfModelInput(t *testing.T) {
 	}))
 	defer server.Close()
 
-	serverTool, err := tool.New(tool.Metadata{Name: "authorize", Version: "1", Description: "Authorize"}, func(_ context.Context, call tool.Call[labeledInput]) (output, error) {
+	serverTool, err := agent.NewTool(agent.ToolMetadata{Name: "authorize", Version: "1", Description: "Authorize"}, func(_ context.Context, call agent.ToolCall[labeledInput]) (output, error) {
 		if call.Context.SessionLabels["client_id"] != "trusted" {
 			return output{Value: "denied"}, nil
 		}
@@ -406,7 +438,7 @@ func TestWorkerUsesTrustedClaimLabelsInsteadOfModelInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, err := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", serverTool))
+	worker, err := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", serverTool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,11 +465,11 @@ func TestSuccessfulOutcomePreservesExactJSONResult(t *testing.T) {
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	exact, _ := tool.New(tool.Metadata{Name: "exact", Version: "1", Description: "exact"}, func(context.Context, tool.Call[input]) (json.RawMessage, error) {
+	exact, _ := agent.NewTool(agent.ToolMetadata{Name: "exact", Version: "1", Description: "exact"}, func(context.Context, agent.ToolCall[input]) (json.RawMessage, error) {
 		cancel()
 		return json.RawMessage(`{"max":18446744073709551615}`), nil
 	})
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", exact))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", exact))
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -455,8 +487,8 @@ func TestClaimPreservesNullInputAndExecutionRejectsIt(t *testing.T) {
 		t.Fatalf("raw input = %q", claim.ToolCall.Input)
 	}
 	called := false
-	w, _ := New(WorkerConfig{Client: config("https://example.com")}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { called = true; return output{}, nil })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, claim.ToolCall.Input, tool.Subject{}, tool.CallContext{})
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { called = true; return output{}, nil })))
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, claim.ToolCall.Input, agent.ToolSubject{}, agent.ToolCallContext{})
 	if called || got.Error == nil {
 		t.Fatalf("called=%v outcome=%+v", called, got)
 	}
@@ -513,7 +545,7 @@ func TestRegisterExecutorValidatesSuccessfulResponse(t *testing.T) {
 				_, _ = io.WriteString(w, response)
 			}))
 			defer server.Close()
-			w, _ := New(WorkerConfig{Client: config(server.URL)}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+			w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 			err := w.Run(context.Background())
 			if err == nil || IsRetryable(err) || claims.Load() != 0 {
 				t.Fatalf("err=%v retryable=%v claims=%d", err, IsRetryable(err), claims.Load())
@@ -525,7 +557,7 @@ func TestRegisterExecutorValidatesSuccessfulResponse(t *testing.T) {
 func TestWorkerTreatsInitialRegistrationDeadlineAsNormalShutdown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
-	worker, err := New(WorkerConfig{Client: config(server.URL)}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	worker, err := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +597,7 @@ func TestHeartbeatExecutorValidatesSuccessfulResponse(t *testing.T) {
 func TestMaintainRegistrationRetainsStateOnMalformedHeartbeat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }))
 	defer server.Close()
-	worker, err := New(WorkerConfig{Client: config(server.URL)}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	worker, err := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +690,7 @@ func TestWorkerSubmitsSafeOutcomeForInvalidClaimDeadline(t *testing.T) {
 			}))
 			defer server.Close()
 
-			worker, err := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) {
+			worker, err := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) {
 				called.Store(true)
 				return output{}, nil
 			})))
@@ -670,7 +702,7 @@ func TestWorkerSubmitsSafeOutcomeForInvalidClaimDeadline(t *testing.T) {
 			}
 			select {
 			case request := <-outcomeReceived:
-				if request.OutcomeToken != "out" || request.Outcome.Error == nil || request.Outcome.Error.Code != tool.UnknownErrorCode || request.Outcome.Error.Message != tool.UnknownErrorMessage {
+				if request.OutcomeToken != "out" || request.Outcome.Error == nil || request.Outcome.Error.Code != unknownToolErrorCode || request.Outcome.Error.Message != unknownToolErrorMessage {
 					t.Fatalf("outcome = %+v", request)
 				}
 			default:
@@ -699,7 +731,7 @@ func TestWorkerDoesNotInvokeHandlerForMissingSubject(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	worker, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) {
+	worker, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) {
 		called.Store(true)
 		return output{}, nil
 	})))
@@ -722,8 +754,8 @@ func TestPublisherValidatesSuccessfulResponse(t *testing.T) {
 		t.Run(response, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, response) }))
 			defer server.Close()
-			publisher, _ := NewPublisher(config(server.URL))
-			_, err := publisher.Publish(context.Background(), namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })), PublishOptions{})
+			publisher, _ := New(config(server.URL))
+			_, err := publisher.PublishToolManifest(context.Background(), namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })), PublishToolManifestOptions{})
 			if err == nil || IsRetryable(err) {
 				t.Fatalf("err=%v retryable=%v", err, IsRetryable(err))
 			}
@@ -734,8 +766,8 @@ func TestPublisherValidatesSuccessfulResponse(t *testing.T) {
 		_, _ = io.WriteString(w, `{"manifestToken":"token","manifestHash":"hash","future":true}`)
 	}))
 	defer server.Close()
-	publisher, _ := NewPublisher(config(server.URL))
-	if _, err := publisher.Publish(context.Background(), namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })), PublishOptions{}); err != nil {
+	publisher, _ := New(config(server.URL))
+	if _, err := publisher.PublishToolManifest(context.Background(), namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })), PublishToolManifestOptions{}); err != nil {
 		t.Fatalf("unknown field: %v", err)
 	}
 }
@@ -758,7 +790,7 @@ func TestMalformedClaimUsesFreshIdempotencyKey(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -770,22 +802,22 @@ func TestMalformedClaimUsesFreshIdempotencyKey(t *testing.T) {
 func TestWorkerMapsErrorsSafelyAndLogsOnlyInternalFailures(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: logger}, namespace(t, "crm",
-		executable(t, "public", "1", func(context.Context, tool.Call[input]) (output, error) {
-			return output{}, fmt.Errorf("wrapped: %w", tool.NewError("safe", "safe message", map[string]any{"x": 1}))
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{Logger: logger}, namespace(t, "crm",
+		executable(t, "public", "1", func(context.Context, agent.ToolCall[input]) (output, error) {
+			return output{}, fmt.Errorf("wrapped: %w", agent.NewToolError("safe", "safe message", map[string]any{"x": 1}))
 		}),
-		executable(t, "internal", "1", func(context.Context, tool.Call[input]) (output, error) {
+		executable(t, "internal", "1", func(context.Context, agent.ToolCall[input]) (output, error) {
 			return output{}, errors.New("database secret")
 		}),
 	))
-	public := w.execute(context.Background(), identity{"crm", "public", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{UserID: "u"}, tool.CallContext{})
-	internal := w.execute(context.Background(), identity{"crm", "internal", "1"}, json.RawMessage(`{"value":"secret input"}`), tool.Subject{UserID: "u"}, tool.CallContext{})
-	unknown := w.execute(context.Background(), identity{"crm", "missing", "1"}, json.RawMessage(`{"password":"secret"}`), tool.Subject{}, tool.CallContext{})
+	public := w.execute(context.Background(), identity{"crm", "public", "1"}, json.RawMessage(`{"value":"x"}`), agent.ToolSubject{UserID: "u"}, agent.ToolCallContext{})
+	internal := w.execute(context.Background(), identity{"crm", "internal", "1"}, json.RawMessage(`{"value":"secret input"}`), agent.ToolSubject{UserID: "u"}, agent.ToolCallContext{})
+	unknown := w.execute(context.Background(), identity{"crm", "missing", "1"}, json.RawMessage(`{"password":"secret"}`), agent.ToolSubject{}, agent.ToolCallContext{})
 	if public.Error.Code != "safe" || public.Error.Details["x"] != json.Number("1") {
 		t.Fatalf("public = %+v", public)
 	}
 	for _, got := range []outcome{internal, unknown} {
-		if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
+		if got.Error == nil || got.Error.Code != unknownToolErrorCode || got.Error.Message != unknownToolErrorMessage || got.Error.Details != nil {
 			t.Fatalf("unsafe = %+v", got)
 		}
 	}
@@ -799,13 +831,13 @@ func TestWorkerRedactsOrdinaryHandlerError(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	secret := "awi_tst_api awi_tex_executor awi_tco_outcome sha256:tokenhash"
-	w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: logger}, namespace(t, "crm",
-		executable(t, "lookup", "7", func(context.Context, tool.Call[input]) (output, error) {
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{Logger: logger}, namespace(t, "crm",
+		executable(t, "lookup", "7", func(context.Context, agent.ToolCall[input]) (output, error) {
 			return output{}, errors.New("backend failed with " + secret)
 		}),
 	))
 
-	w.execute(context.Background(), identity{"crm", "lookup", "7"}, json.RawMessage(`{"value":"x"}`), tool.Subject{UserID: "user_42"}, tool.CallContext{})
+	w.execute(context.Background(), identity{"crm", "lookup", "7"}, json.RawMessage(`{"value":"x"}`), agent.ToolSubject{UserID: "user_42"}, agent.ToolCallContext{})
 	text := logs.String()
 	for _, leaked := range strings.Fields(secret) {
 		if strings.Contains(text, leaked) {
@@ -833,13 +865,13 @@ func TestWorkerCancellationAndOneShotLifecycle(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	h := func(ctx context.Context, _ tool.Call[input]) (output, error) {
+	h := func(ctx context.Context, _ agent.ToolCall[input]) (output, error) {
 		close(started)
 		<-ctx.Done()
 		close(stopped)
 		return output{}, ctx.Err()
 	}
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "wait", "1", h)))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "wait", "1", h)))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -867,13 +899,13 @@ func TestAwaitResultPrefersCompletedOutcomeOverCancellation(t *testing.T) {
 }
 
 func TestIsRetryable(t *testing.T) {
-	if !IsRetryable(errors.New("network")) || !IsRetryable(APIError{StatusCode: 429}) || IsRetryable(APIError{StatusCode: 409}) {
+	if !IsRetryable(net.UnknownNetworkError("network")) || !IsRetryable(Error{StatusCode: 429}) || IsRetryable(Error{StatusCode: 409}) {
 		t.Fatal("retry classification")
 	}
 }
 
 func TestRedactSecrets(t *testing.T) {
-	redacted := Redact("awi_tst_secret awi_tex_exec awi_tco_out sha256:abcdef")
+	redacted := redact("awi_tst_secret awi_tex_exec awi_tco_out sha256:abcdef")
 	if strings.Contains(redacted, "awi_") || strings.Contains(redacted, "sha256:abcdef") {
 		t.Fatal(redacted)
 	}
@@ -898,7 +930,7 @@ func TestGlobalConcurrency(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	h := func(context.Context, tool.Call[input]) (output, error) {
+	h := func(context.Context, agent.ToolCall[input]) (output, error) {
 		n := running.Add(1)
 		for {
 			old := max.Load()
@@ -911,7 +943,7 @@ func TestGlobalConcurrency(t *testing.T) {
 		return output{}, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w, _ := New(WorkerConfig{Client: config(server.URL), MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", h)), namespace(t, "billing", executable(t, "work", "1", h)))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{MaxConcurrentCalls: 2, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", h)), namespace(t, "billing", executable(t, "work", "1", h)))
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	deadline := time.Now().Add(time.Second)
@@ -946,7 +978,7 @@ func TestExpiredUncooperativeHandlerKeepsConcurrencySlot(t *testing.T) {
 	}))
 	defer server.Close()
 
-	h := func(_ context.Context, call tool.Call[input]) (output, error) {
+	h := func(_ context.Context, call agent.ToolCall[input]) (output, error) {
 		n := starts.Add(1)
 		if n == 1 {
 			close(firstStarted)
@@ -957,7 +989,7 @@ func TestExpiredUncooperativeHandlerKeepsConcurrencySlot(t *testing.T) {
 		return output{Value: call.Input.Value}, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w, _ := New(WorkerConfig{Client: config(server.URL), MaxConcurrentCalls: 1, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", h)))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{MaxConcurrentCalls: 1, ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", h)))
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	<-firstStarted
@@ -985,28 +1017,30 @@ func TestExpiredUncooperativeHandlerKeepsConcurrencySlot(t *testing.T) {
 func TestExecutionFailureMappingAndLogging(t *testing.T) {
 	tests := []struct {
 		name    string
-		handler tool.Handler[input, output]
+		handler agent.ToolHandler[input, output]
 		raw     json.RawMessage
 		cancel  bool
 		wantLog string
 	}{
-		{"decode", func(context.Context, tool.Call[input]) (output, error) {
+		{"decode", func(context.Context, agent.ToolCall[input]) (output, error) {
 			t.Fatal("handler called")
 			return output{}, nil
 		}, json.RawMessage(`{"unknown":1}`), false, "decode input"},
-		{"ordinary", func(context.Context, tool.Call[input]) (output, error) {
+		{"ordinary", func(context.Context, agent.ToolCall[input]) (output, error) {
 			return output{}, errors.New("internal marker")
 		}, json.RawMessage(`{"value":"x"}`), false, "internal marker"},
-		{"panic", func(context.Context, tool.Call[input]) (output, error) { panic("panic marker") }, json.RawMessage(`{"value":"x"}`), false, "panic marker"},
-		{"canceled", func(context.Context, tool.Call[input]) (output, error) { return output{}, context.Canceled }, json.RawMessage(`{"value":"x"}`), false, ""},
-		{"deadline", func(context.Context, tool.Call[input]) (output, error) { return output{}, context.DeadlineExceeded }, json.RawMessage(`{"value":"x"}`), false, ""},
+		{"panic", func(context.Context, agent.ToolCall[input]) (output, error) { panic("panic marker") }, json.RawMessage(`{"value":"x"}`), false, "panic marker"},
+		{"canceled", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, context.Canceled }, json.RawMessage(`{"value":"x"}`), false, ""},
+		{"deadline", func(context.Context, agent.ToolCall[input]) (output, error) {
+			return output{}, context.DeadlineExceeded
+		}, json.RawMessage(`{"value":"x"}`), false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", executable(t, "work", "1", tt.handler)))
-			got := w.execute(context.Background(), identity{"crm", "work", "1"}, tt.raw, tool.Subject{UserID: "u"}, tool.CallContext{})
-			if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
+			w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", executable(t, "work", "1", tt.handler)))
+			got := w.execute(context.Background(), identity{"crm", "work", "1"}, tt.raw, agent.ToolSubject{UserID: "u"}, agent.ToolCallContext{})
+			if got.Error == nil || got.Error.Code != unknownToolErrorCode || got.Error.Message != unknownToolErrorMessage || got.Error.Details != nil {
 				t.Fatalf("outcome=%+v", got)
 			}
 			if tt.wantLog == "" && logs.Len() != 0 {
@@ -1019,12 +1053,12 @@ func TestExecutionFailureMappingAndLogging(t *testing.T) {
 	}
 
 	var logs bytes.Buffer
-	encodeTool, err := tool.New(tool.Metadata{Name: "encode", Version: "1", Description: "encode"}, func(context.Context, tool.Call[input]) (chan int, error) { return make(chan int), nil })
+	encodeTool, err := agent.NewTool(agent.ToolMetadata{Name: "encode", Version: "1", Description: "encode"}, func(context.Context, agent.ToolCall[input]) (chan int, error) { return make(chan int), nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", encodeTool))
-	got := w.execute(context.Background(), identity{"crm", "encode", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", encodeTool))
+	got := w.execute(context.Background(), identity{"crm", "encode", "1"}, json.RawMessage(`{"value":"x"}`), agent.ToolSubject{}, agent.ToolCallContext{})
 	if got.Error == nil || !strings.Contains(logs.String(), "encode output") {
 		t.Fatalf("outcome=%+v log=%s", got, logs.String())
 	}
@@ -1049,7 +1083,7 @@ func TestClaimRetryPreservesIdempotencyKeyAndPolling(t *testing.T) {
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: time.Hour}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	w.afterClaim = func() {
 		if calls.Load() >= 3 {
 			cancel()
@@ -1074,7 +1108,7 @@ func TestOutcomeRetryPreservesIdempotencyKey(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(true)})
 	}))
 	defer server.Close()
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	if err := w.submitOutcomeWithRetry(context.Background(), "out", succeeded(nil), time.Now().Add(5*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -1090,7 +1124,7 @@ func TestOutcomeRecordedFalseIsIdempotentSuccess(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(submitOutcomeAck{Recorded: boolPointer(false)})
 	}))
 	defer server.Close()
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, nil })))
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil })))
 	err := w.submitOutcomeWithRetry(context.Background(), "out", internalFailure(), time.Now().Add(time.Second))
 	if err != nil || calls.Load() != 1 {
 		t.Fatalf("err=%v calls=%d", err, calls.Load())
@@ -1113,19 +1147,19 @@ func TestOutcomeRequiresExplicitRecordedBoolean(t *testing.T) {
 }
 
 func TestTypedNilToolErrorMapsSafely(t *testing.T) {
-	var publicErr *tool.Error
-	w, _ := New(WorkerConfig{Client: config("https://example.com")}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, publicErr })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
-	if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
+	var publicErr *agent.ToolError
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, publicErr })))
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), agent.ToolSubject{}, agent.ToolCallContext{})
+	if got.Error == nil || got.Error.Code != unknownToolErrorCode || got.Error.Message != unknownToolErrorMessage || got.Error.Details != nil {
 		t.Fatalf("outcome=%+v", got)
 	}
 }
 
 func TestBlankPublicToolErrorMapsToUnknownWithoutDetails(t *testing.T) {
-	handlerErr := &tool.Error{}
-	w, _ := New(WorkerConfig{Client: config("https://example.com")}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, handlerErr })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
-	if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || got.Error.Message != tool.UnknownErrorMessage || got.Error.Details != nil {
+	handlerErr := &agent.ToolError{}
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, handlerErr })))
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), agent.ToolSubject{}, agent.ToolCallContext{})
+	if got.Error == nil || got.Error.Code != unknownToolErrorCode || got.Error.Message != unknownToolErrorMessage || got.Error.Details != nil {
 		t.Fatalf("outcome=%+v", got)
 	}
 }
@@ -1133,9 +1167,9 @@ func TestBlankPublicToolErrorMapsToUnknownWithoutDetails(t *testing.T) {
 func TestTypedNilOrdinaryErrorMapsSafely(t *testing.T) {
 	var handlerErr *nilReceiverError
 	var logs bytes.Buffer
-	w, _ := New(WorkerConfig{Client: config("https://example.com"), Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, tool.Call[input]) (output, error) { return output{}, handlerErr })))
-	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), tool.Subject{}, tool.CallContext{})
-	if got.Error == nil || got.Error.Code != tool.UnknownErrorCode || logs.Len() != 0 {
+	w, _ := NewToolWorker(mustClient(t, config("https://example.com")), ToolWorkerOptions{Logger: slog.New(slog.NewTextHandler(&logs, nil))}, namespace(t, "crm", executable(t, "work", "1", func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, handlerErr })))
+	got := w.execute(context.Background(), identity{"crm", "work", "1"}, json.RawMessage(`{"value":"x"}`), agent.ToolSubject{}, agent.ToolCallContext{})
+	if got.Error == nil || got.Error.Code != unknownToolErrorCode || logs.Len() != 0 {
 		t.Fatalf("outcome=%+v logs=%q", got, logs.String())
 	}
 }
@@ -1167,8 +1201,8 @@ func TestHeartbeatAndRefreshUseAllNamespaces(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
-	h := func(context.Context, tool.Call[input]) (output, error) { return output{}, nil }
-	w, _ := New(WorkerConfig{Client: config(server.URL), ClaimPollInterval: time.Millisecond, HeartbeatInterval: 5 * time.Millisecond, RefreshSkew: 50 * time.Millisecond}, namespace(t, "crm", executable(t, "a", "1", h)), namespace(t, "billing", executable(t, "b", "1", h)))
+	h := func(context.Context, agent.ToolCall[input]) (output, error) { return output{}, nil }
+	w, _ := NewToolWorker(mustClient(t, config(server.URL)), ToolWorkerOptions{ClaimPollInterval: time.Millisecond, HeartbeatInterval: 5 * time.Millisecond, RefreshSkew: 50 * time.Millisecond}, namespace(t, "crm", executable(t, "a", "1", h)), namespace(t, "billing", executable(t, "b", "1", h)))
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}

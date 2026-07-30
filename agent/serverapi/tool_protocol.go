@@ -1,4 +1,4 @@
-package toolworker
+package serverapi
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aimount/aimount-go/agent"
 	"github.com/aimount/aimount-go/internal/httpjson"
-	"github.com/aimount/aimount-go/tool"
 )
 
 type client struct {
@@ -34,7 +34,7 @@ type wireDefinition struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-type PublishManifestAck struct {
+type PublishedToolManifest struct {
 	ManifestToken string `json:"manifestToken"`
 	ManifestHash  string `json:"manifestHash"`
 }
@@ -53,12 +53,12 @@ type claimAck struct {
 }
 
 type claimedCall struct {
-	Namespace string           `json:"namespace"`
-	Name      string           `json:"name"`
-	Version   string           `json:"version"`
-	Input     json.RawMessage  `json:"input"`
-	Subject   tool.Subject     `json:"subject"`
-	Context   tool.CallContext `json:"context"`
+	Namespace string                `json:"namespace"`
+	Name      string                `json:"name"`
+	Version   string                `json:"version"`
+	Input     json.RawMessage       `json:"input"`
+	Subject   agent.ToolSubject     `json:"subject"`
+	Context   agent.ToolCallContext `json:"context"`
 }
 
 type submitOutcomeRequest struct {
@@ -76,11 +76,24 @@ type heartbeatExecutorAckWire struct {
 
 type heartbeatExecutorAck struct{ ExecutorTokenExpiresAt time.Time }
 
-func (c client) publishManifest(ctx context.Context, namespace string, definitions []wireDefinition, options PublishOptions) (PublishManifestAck, error) {
-	var ack PublishManifestAck
+func (c client) publishManifest(ctx context.Context, namespace string, definitions []wireDefinition, options PublishToolManifestOptions) (PublishedToolManifest, error) {
+	var ack PublishedToolManifest
 	policy := options.ConflictResolutionPolicy
-	if policy == ManifestConflictReplace && options.IfMatchManifestToken != "" {
-		return ack, fmt.Errorf("ifMatchManifestToken is not allowed with replace conflict policy")
+	switch policy {
+	case "":
+		if options.IfMatchManifestToken != "" {
+			return ack, fmt.Errorf("conflict resolution policy is required with ifMatchManifestToken")
+		}
+	case ManifestConflictReplace:
+		if options.IfMatchManifestToken != "" {
+			return ack, fmt.Errorf("ifMatchManifestToken is not allowed with replace conflict policy")
+		}
+	case ManifestConflictReplaceIfTokenMatch:
+		if options.IfMatchManifestToken == "" {
+			return ack, fmt.Errorf("ifMatchManifestToken is required with replace-if-token-match conflict policy")
+		}
+	default:
+		return ack, fmt.Errorf("unsupported manifest conflict resolution policy %q", policy)
 	}
 	var ifMatch *string
 	if options.IfMatchManifestToken != "" {
@@ -90,7 +103,7 @@ func (c client) publishManifest(ctx context.Context, namespace string, definitio
 		return ack, err
 	}
 	if strings.TrimSpace(ack.ManifestToken) == "" || strings.TrimSpace(ack.ManifestHash) == "" {
-		return ack, protocolError{"toolworker: malformed manifest response"}
+		return ack, protocolError{"serverapi: malformed manifest response"}
 	}
 	return ack, nil
 }
@@ -105,7 +118,7 @@ func (c client) registerExecutor(ctx context.Context, namespaces []string) (regi
 	}
 	expires, err := time.Parse(time.RFC3339, wire.ExecutorTokenExpiresAt)
 	if strings.TrimSpace(wire.ExecutorToken) == "" || err != nil || !time.Now().Before(expires) {
-		return registerExecutorAck{}, protocolError{"toolworker: malformed registration response"}
+		return registerExecutorAck{}, protocolError{"serverapi: malformed registration response"}
 	}
 	return registerExecutorAck{ExecutorToken: wire.ExecutorToken, ExecutorTokenExpiresAt: expires}, nil
 }
@@ -117,7 +130,7 @@ func (c client) heartbeatExecutor(ctx context.Context, executorToken string) (he
 	}
 	expires, err := time.Parse(time.RFC3339, wire.ExecutorTokenExpiresAt)
 	if err != nil || !time.Now().Before(expires) {
-		return heartbeatExecutorAck{}, protocolError{"toolworker: malformed heartbeat response"}
+		return heartbeatExecutorAck{}, protocolError{"serverapi: malformed heartbeat response"}
 	}
 	return heartbeatExecutorAck{ExecutorTokenExpiresAt: expires}, nil
 }
@@ -140,16 +153,16 @@ func (c client) claim(ctx context.Context, executorToken string, namespaces []st
 	switch ack.Kind {
 	case "none":
 		if ack.OutcomeToken != "" || len(wire.ClaimExpiresAt) != 0 || ack.ToolCall.Namespace != "" || ack.ToolCall.Name != "" || ack.ToolCall.Version != "" || len(ack.ToolCall.Input) != 0 || ack.ToolCall.Subject.UserID != "" || len(ack.ToolCall.Context.SessionLabels) != 0 {
-			return ack, protocolError{"toolworker: malformed empty claim response"}
+			return ack, protocolError{"serverapi: malformed empty claim response"}
 		}
 		return ack, nil
 	case "claimed":
 		if strings.TrimSpace(ack.OutcomeToken) == "" || strings.TrimSpace(ack.ToolCall.Namespace) == "" || strings.TrimSpace(ack.ToolCall.Name) == "" || strings.TrimSpace(ack.ToolCall.Version) == "" || len(ack.ToolCall.Input) == 0 || strings.TrimSpace(ack.ToolCall.Subject.UserID) == "" {
-			return ack, protocolError{"toolworker: malformed claimed response"}
+			return ack, protocolError{"serverapi: malformed claimed response"}
 		}
 		return ack, nil
 	default:
-		return ack, protocolError{"toolworker: malformed claim response"}
+		return ack, protocolError{"serverapi: malformed claim response"}
 	}
 }
 
@@ -159,7 +172,7 @@ func (c client) submitOutcome(ctx context.Context, outcomeToken string, outcome 
 		return err
 	}
 	if ack.Recorded == nil {
-		return protocolError{"toolworker: malformed outcome response: recorded must be boolean"}
+		return protocolError{"serverapi: malformed outcome response: recorded must be boolean"}
 	}
 	return nil
 }
@@ -169,12 +182,12 @@ func (c client) do(ctx context.Context, method string, path string, body any, re
 	if err != nil {
 		var decodeErr httpjson.DecodeError
 		if errors.As(err, &decodeErr) {
-			return protocolError{fmt.Sprintf("toolworker: malformed successful response: %v", err)}
+			return protocolError{fmt.Sprintf("serverapi: malformed successful response: %v", err)}
 		}
 		return err
 	}
 	if requestErr != nil {
-		return APIError{Method: method, Path: path, StatusCode: requestErr.StatusCode, Code: requestErr.Code}
+		return Error{Method: method, Path: path, StatusCode: requestErr.StatusCode, Code: requestErr.Code}
 	}
 	return nil
 }

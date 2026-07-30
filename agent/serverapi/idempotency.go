@@ -1,4 +1,4 @@
-package toolworker
+package serverapi
 
 import (
 	"crypto/rand"
