@@ -22,15 +22,21 @@ func (e DecodeError) Error() string { return e.Err.Error() }
 func (e DecodeError) Unwrap() error { return e.Err }
 
 func Do(ctx context.Context, client *http.Client, method, baseURL, path, token, idempotencyKey string, body, result any) (*Error, error) {
-	encoded, err := json.Marshal(body)
+	var requestBody io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		requestBody = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+path, requestBody)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+path, bytes.NewReader(encoded))
-	if err != nil {
-		return nil, err
+	if body != nil {
+		req.Header.Set("content-type", "application/json")
 	}
-	req.Header.Set("content-type", "application/json")
 	req.Header.Set("authorization", "Bearer "+token)
 	if idempotencyKey != "" {
 		req.Header.Set("idempotency-key", idempotencyKey)

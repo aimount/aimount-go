@@ -7,7 +7,40 @@ Go SDK for Aimount Agent integrations.
 - `agent`: shared Agent entities and typed executable tools.
 - `agent/serverapi`: trusted-backend Agent Server API client, manifest publication, and tool workers.
 
-The SDK does not publish empty Client API or Console API packages. Those packages will be added when they expose real operations.
+The SDK does not publish an empty Client API package. It will be added when it exposes real operations.
+
+## Aimount CLI
+
+The `aimount` CLI provides the first imperative operator workflow for Aimount Console API resources. Build it as a standalone binary with no Node.js or Bun runtime:
+
+```bash
+make build
+./dist/aimount help
+```
+
+Configure a Console API token and optionally override the production API URL:
+
+```bash
+export AIMOUNT_TOKEN="awi_pat_..."
+export AIMOUNT_API_URL="https://api.aimount.dev" # optional default
+```
+
+Supported MVP commands:
+
+```bash
+aimount auth whoami
+aimount agents list
+aimount agents set support --name "Support"
+aimount agents instruction set support --file instruction.md
+```
+
+If the token can access exactly one organization, resource commands select it automatically. Otherwise provide the global option before the command:
+
+```bash
+aimount --org org_123 agents list
+```
+
+`agents set` idempotently creates or updates the agent through the Console API. `agents instruction set` creates an instruction version and immediately releases it; if release fails, the error includes the created version ID.
 
 ## Server API Client
 
