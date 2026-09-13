@@ -4,6 +4,7 @@ package serverapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -87,6 +88,15 @@ type Error struct {
 	Path       string
 	StatusCode int
 	Code       string
+	// Type, Message and Details preserve the Cloud envelope for memory errors.
+	Type    string
+	Message string
+	Details json.RawMessage
+	// OutcomeUnknown means a memory write may have applied. Reconcile through ListMemory.
+	OutcomeUnknown bool
+	// IdempotencyKey is the key used for a memory create, including on failure.
+	IdempotencyKey string
+	cause          error
 }
 
 func asError(err error) (Error, bool) {
@@ -102,11 +112,16 @@ func asError(err error) (Error, bool) {
 }
 
 func (e Error) Error() string {
+	if e.OutcomeUnknown {
+		return e.Method + " " + e.Path + " outcome unknown: reconcile memory before another write"
+	}
 	if e.Code != "" {
 		return e.Method + " " + e.Path + " failed: " + e.Code
 	}
 	return e.Method + " " + e.Path + " failed"
 }
+
+func (e Error) Unwrap() error { return e.cause }
 
 func IsRetryable(err error) bool {
 	if err == nil {
@@ -119,7 +134,12 @@ func IsRetryable(err error) bool {
 		return false
 	}
 	if apiErr, ok := asError(err); ok {
-		return httpjson.RetryableStatus(apiErr.StatusCode)
+		if apiErr.OutcomeUnknown {
+			return false
+		}
+		if apiErr.StatusCode != 0 {
+			return httpjson.RetryableStatus(apiErr.StatusCode)
+		}
 	}
 	var networkErr net.Error
 	return errors.As(err, &networkErr)

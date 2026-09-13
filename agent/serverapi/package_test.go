@@ -23,6 +23,12 @@ func TestPublicServerAPISurfaceCompiles(t *testing.T) {
 	var _ serverapi.PublishedToolManifest
 	var _ serverapi.ToolWorkerOptions
 	var _ *serverapi.ToolWorker
+	var _ func(context.Context, serverapi.ListMemoryParams) (serverapi.ListMemoryResult, error) = client.ListMemory
+	var _ func(context.Context, serverapi.CreateMemoryParams) (serverapi.CreateMemoryResult, error) = client.CreateMemory
+	var _ func(context.Context, serverapi.UpdateMemoryParams) (serverapi.UpdateMemoryResult, error) = client.UpdateMemory
+	var _ func(context.Context, serverapi.DeleteMemoryParams) (serverapi.DeleteMemoryResult, error) = client.DeleteMemory
+	var _ serverapi.AgentMemoryBlock
+	var _ serverapi.MemoryActor = serverapi.MemoryActorService
 	apiErr := serverapi.Error{StatusCode: http.StatusTooManyRequests, Code: "rate_limited"}
 	if serverapi.ErrorCode(apiErr) != "rate_limited" || serverapi.HTTPStatus(apiErr) != http.StatusTooManyRequests || !serverapi.IsRetryable(apiErr) {
 		t.Fatal("server API error helpers changed")

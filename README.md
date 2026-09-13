@@ -67,6 +67,70 @@ _ = token.AccessToken
 
 `AgentAPIKey` is a backend-only credential. Do not expose it to browser, mobile, or other end-user clients; send only the issued Agent User access token payload to those clients.
 
+## User Memory
+
+Server API memory belongs to one agent and client-provided end user, independently of sessions, profiles, and surfaces. Keys need `agent:memory:read` for `ListMemory` and `agent:memory:write` for mutations; neither scope implies the other or is granted to existing keys automatically.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `ListMemory` | `ListMemoryParams{UserID}` | `ListMemoryResult{Blocks}` |
+| `CreateMemory` | `CreateMemoryParams{UserID, Text, ManagedBy, IdempotencyKey}` | `CreateMemoryResult{Operation, Block, IdempotencyKey}` |
+| `UpdateMemory` | `UpdateMemoryParams{UserID, MemoryID, Version, Text}` | `UpdateMemoryResult{Operation, Block}` |
+| `DeleteMemory` | `DeleteMemoryParams{UserID, MemoryID, Version}` | `DeleteMemoryResult{Operation, ID, Version}` |
+
+Each method takes `context.Context` and returns `(Result, error)`. `AgentMemoryBlock` exposes opaque string `ID`, exact `Text`, `int64` `Version`, `ManagedBy`, `CreatedBy`, `UpdatedBy`, and UTC `time.Time` timestamps `CreatedAt`/`UpdatedAt`. `MemoryActorUser`, `MemoryActorAgent`, and `MemoryActorService` are the three management/author kinds. Server creation defaults to service management; selecting another manager does not change the backend's service authorship. Unknown response fields are ignored, while required fields are validated.
+
+Create/update text must be nonblank valid UTF-8 without NUL, at most 2,048 bytes; accepted whitespace and formatting are preserved. Cloud additionally enforces 50 blocks and 16,384 text bytes per owner. Update/delete require the version read from the block, from 1 through `MaxMemoryVersion` (9007199254740991). The SDK sends it as a quoted `If-Match` header; PATCH sends only text and DELETE sends no body. Identical-text updates can return the unchanged version; deletion returns the last deleted version.
+
+Memory success responses require valid UTF-8 wire bytes and NUL-free block text. Escaped lone UTF-16 surrogates retain Go `encoding/json` behavior: they decode as U+FFFD, which is also allowed as legitimate text. Valid Cloud responses never contain lone surrogates; the SDK does not implement a custom JSON decoder.
+
+### Creation Replay
+
+`CreateMemory` sends one POST, generating an idempotency key unless supplied. The key is returned in `CreateMemoryResult.IdempotencyKey` even on failure after generation, and in `serverapi.Error.IdempotencyKey` for request/response errors. Retain it with the original user, exact text, and effective management kind; an application retry must supply that same key, not start another keyless call:
+
+```go
+params := serverapi.CreateMemoryParams{
+	UserID: "user_123", Text: "Prefers concise answers.",
+	ManagedBy: serverapi.MemoryActorAgent,
+}
+created, err := client.CreateMemory(ctx, params)
+params.IdempotencyKey = created.IdempotencyKey // retain even when err != nil
+if err != nil {
+	// Persist params for an application-decided retry with this same key.
+	return err
+}
+_ = created.Block
+```
+
+Cloud replays the original successful creation for 24 hours, including across authorized key rotation. Changed content conflicts; after retention the key can create a new block. Replay does not restore an edited/deleted block or represent its current state. Use `ListMemory` for current state.
+
+### Conflicts And Uncertainty
+
+Memory errors preserve `serverapi.Error.Type`, `Code`, `Message`, and `Details` (`json.RawMessage`), plus `Method`, `Path`, and `StatusCode`. `ErrorCode` and `HTTPStatus` also work through wrapping. A known `412` version conflict includes `details.currentBlock`; missing server preconditions return `428`. Local invalid versions are rejected before any request. Decode conflict details into a struct with `CurrentBlock serverapi.AgentMemoryBlock` tagged `json:"currentBlock"` when needed; never silently substitute its newer version and repeat the old write.
+
+PATCH/DELETE never automatically retry or follow redirects. A lost/truncated response, malformed success, timeout, or server/gateway failure can leave `Error.OutcomeUnknown` true. `IsRetryable` is false for uncertain writes, including wrapped errors. A context already canceled before dispatch is not an unknown outcome. Inspect uncertainty before treating the request as rejected:
+
+```go
+_, err := client.UpdateMemory(ctx, serverapi.UpdateMemoryParams{
+	UserID: "user_123", MemoryID: observed.ID,
+	Version: observed.Version, Text: "Prefers detailed examples.",
+})
+var apiErr serverapi.Error
+if errors.As(err, &apiErr) && apiErr.OutcomeUnknown {
+	// Use a fresh live context if the write's context expired.
+	current, readErr := client.ListMemory(reconcileCtx, serverapi.ListMemoryParams{UserID: "user_123"})
+	if readErr != nil {
+		return readErr // write outcome remains unknown
+	}
+	_ = current // reconcile; do not automatically repeat the original mutation
+}
+if err != nil {
+	return err
+}
+```
+
+GET can show current text or absence but cannot prove which writer caused it. A further write is a new application decision against current state. Memory mutations do not trigger an SDK refresh or live subscription, and deleting memory does not erase conversation history or prevent later re-learning. Blocks have no TTL or first-version undo.
+
 ## Server Tools
 
 `agent.NewTool` derives an input schema from a named Go struct and binds it to a typed handler. `serverapi.ToolWorker` registers live executor availability, claims calls, runs handlers, and submits outcomes.

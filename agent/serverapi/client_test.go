@@ -88,6 +88,26 @@ func TestIsRetryableRejectsPermanentLocalErrors(t *testing.T) {
 	}
 }
 
+func TestMemoryErrorEnvelopePreserved(t *testing.T) {
+	var apiErr Error
+	if err := json.Unmarshal([]byte(`{"type":"conflict","code":"conflict.agent.memory.version","message":"Memory changed","details":{"currentBlock":{"id":"opaque","version":3},"future":true}}`), &apiErr); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(apiErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"Type", "Message", "Details"} {
+		if _, ok := fields[field]; !ok {
+			t.Errorf("Error drops Cloud %s: %s", field, encoded)
+		}
+	}
+}
+
 func TestIssueUserAccessTokenValidatesAndParsesResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
